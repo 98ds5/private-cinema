@@ -638,6 +638,27 @@ QLabel#cardBadges {{
     padding: 2px 0; background: transparent;
 }}
 
+QFrame#recentRow {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+}}
+QFrame#recentRow:hover {{
+    background-color: {surface};
+    border: 1px solid {accent};
+}}
+QLabel#recentTitle {{ font-size: 12px; font-weight: 500; }}
+QLabel#recentMeta {{ font-size: 10px; color: {muted}; }}
+QPushButton#recentResume {{
+    background-color: {accent}; color: {on_accent};
+    border: none; border-radius: 4px;
+    padding: 3px 10px; font-size: 10px; font-weight: 600;
+}}
+QPushButton#recentResume:hover {{ background-color: {hover}; }}
+QPushButton#recentResume:disabled {{
+    background-color: {surface}; color: {muted};
+}}
+
 QWidget#nowPlayingBar {{
     background-color: {surface};
     border-top: 1px solid {muted};

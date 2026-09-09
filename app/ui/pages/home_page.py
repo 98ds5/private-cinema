@@ -6,9 +6,9 @@
 from typing import Optional
 
 from PySide6.QtWidgets import (
-    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QGridLayout,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QGridLayout, QPushButton,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from app.services.stats import StatsService
 
@@ -48,7 +48,88 @@ class StatCard(QFrame):
         self.num_label.setText(text)
 
 
+class RecentRow(QFrame):
+    """
+    「最近观看」的一行。
+
+    原先这几行是把裸 QLabel 塞进 QHBoxLayout 再包个 QWidget: 没有按钮、
+    没有 mousePressEvent、没有手型光标、没有任何信号 —— 看着像列表,
+    实际上点不动。用户报"最近观看也无法点进去具体看的哪个继续看"就是它。
+
+    现在给了两个动作, 分别对应用户那句话的两半:
+      ▶ 继续观看 (点整行也一样) → 从上次的进度直接续播
+      详情                      → 进详情页, 能看清是哪一集、也能改看别的集
+    """
+    resume_clicked = Signal(dict)
+    detail_clicked = Signal(int)
+
+    def __init__(self, item: dict, parent=None):
+        super().__init__(parent)
+        self.setObjectName("recentRow")
+        self._item = item
+        self._media_id = item.get("id")
+        self._can_resume = bool(item.get("file_path"))
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 6, 12, 6)
+        row.setSpacing(8)
+
+        title = QLabel(item.get("title") or "未知")
+        title.setObjectName("recentTitle")
+        # QLabel 的 minimumSizeHint 等于整行文字宽, 长标题会把行撑爆
+        title.setMinimumWidth(60)
+        row.addWidget(title, stretch=1)
+
+        # 动漫要显式说出是第几集 —— "无法点进去具体看的哪个"的"哪个"就是它
+        ep_no = item.get("episode_number")
+        if ep_no:
+            ep = QLabel(f"第{ep_no}集")
+            ep.setObjectName("recentMeta")
+            row.addWidget(ep)
+
+        prog = QLabel(item.get("progress_text") or "")
+        prog.setObjectName("recentMeta")
+        row.addWidget(prog)
+
+        # 进度为 0 时写"继续观看"是假的 (用户点开就关了, 什么都没看),
+        # 按实际进度切文案, 免得按钮和它右边那行字自相矛盾
+        pos = int(item.get("position") or 0)
+        self._resume_btn = QPushButton("▶ 继续观看" if pos > 0 else "▶ 播放")
+        self._resume_btn.setObjectName("recentResume")
+        self._resume_btn.setCursor(Qt.PointingHandCursor)
+        self._resume_btn.setEnabled(self._can_resume)
+        if not self._can_resume:
+            self._resume_btn.setText("文件缺失")
+            self._resume_btn.setToolTip("记录里没有这个作品的视频文件路径")
+        self._resume_btn.clicked.connect(
+            lambda: self.resume_clicked.emit(self._item))
+        row.addWidget(self._resume_btn)
+
+        detail_btn = QPushButton("详情")
+        detail_btn.setObjectName("rowAction")     # 复用详情页已有的按钮样式
+        detail_btn.setCursor(Qt.PointingHandCursor)
+        detail_btn.clicked.connect(
+            lambda: self.detail_clicked.emit(self._media_id))
+        row.addWidget(detail_btn)
+
+        # 整行也可点 = 续播, 符合"点进去继续看"的直觉
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(
+            f"{item.get('title') or ''}\n{item.get('file_path') or '（没有记录到视频文件）'}"
+        )
+
+    def mousePressEvent(self, ev):
+        # 点按钮时 QPushButton 会吃掉事件, 不会走到这里, 所以不会重复触发
+        if ev.button() == Qt.LeftButton and self._can_resume:
+            self.resume_clicked.emit(self._item)
+        super().mousePressEvent(ev)
+
+
 class HomePage(QWidget):
+    # HomePage 不自己碰播放器和导航, 只把意图抛给 MainWindow
+    resume_requested = Signal(dict)    # 续播: 带 file_path/episode_id/position
+    detail_requested = Signal(int)     # 进详情页: 带 media_id
+
     def __init__(self, stats_service: Optional[StatsService] = None, parent=None):
         super().__init__(parent)
         self.setObjectName("pageContent")
@@ -94,7 +175,8 @@ class HomePage(QWidget):
         self._recent_container = QFrame()
         self._recent_container.setObjectName("mediaCard")
         self._recent_layout = QVBoxLayout(self._recent_container)
-        self._recent_layout.setAlignment(Qt.AlignCenter)
+        # 不再 setAlignment(AlignCenter): 那会把每行压到 sizeHint 宽度,
+        # 行内的 stretch 失效, 按钮全挤到中间而不是靠右。列表行应该占满宽度。
         self._recent_placeholder = QLabel("暂无最近观看记录\n添加媒体库目录后自动扫描入库")
         self._recent_placeholder.setAlignment(Qt.AlignCenter)
         self._recent_placeholder.setStyleSheet("color: #636366; font-size: 12px;")
@@ -134,26 +216,22 @@ class HomePage(QWidget):
 
     def _update_recent(self, items: list):
         """更新最近观看列表"""
-        # 清空旧内容
+        # 清空旧内容 —— 但**不能顺手把占位符也 deleteLater 掉**:
+        # 它是在构造函数里建好、空列表时要重新塞回来的同一个实例。
+        # 原先无差别 deleteLater, 于是"刷新一次(空) → 再刷新"时占位符已被销毁。
         while self._recent_layout.count():
             item = self._recent_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w is not None and w is not self._recent_placeholder:
+                w.deleteLater()
 
         if not items:
             self._recent_layout.addWidget(self._recent_placeholder)
             return
 
         for item in items[:5]:
-            row = QHBoxLayout()
-            title = QLabel(item["title"])
-            title.setStyleSheet("font-size: 12px; font-weight: 500;")
-            row.addWidget(title)
-            row.addStretch()
-            progress = QLabel(item["progress"])
-            progress.setStyleSheet("font-size: 10px; color: #636366;")
-            row.addWidget(progress)
-
-            container = QWidget()
-            container.setLayout(row)
-            self._recent_layout.addWidget(container)
+            row = RecentRow(item)
+            # 信号转发信号: 播放和导航都由 MainWindow 负责
+            row.resume_clicked.connect(self.resume_requested)
+            row.detail_clicked.connect(self.detail_requested)
+            self._recent_layout.addWidget(row)

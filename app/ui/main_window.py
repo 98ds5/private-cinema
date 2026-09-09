@@ -6,6 +6,7 @@
                                              关 缩 放
 """
 import ctypes
+import os
 from ctypes import wintypes
 
 from PySide6.QtWidgets import (
@@ -229,6 +230,9 @@ class MainWindow(QMainWindow):
 
         self.pages = QStackedWidget()
         self._home_page = HomePage(stats_service=self.stats_service)
+        # 首页「最近观看」的两个意图都由主窗口落地: 它才握着播放器和导航栈
+        self._home_page.resume_requested.connect(self._on_resume_requested)
+        self._home_page.detail_requested.connect(self._open_detail)
         self.pages.addWidget(self._home_page)
         self.pages.addWidget(LibraryPage(view="all", stats_service=self.stats_service))
         self.pages.addWidget(LibraryPage(view="movie", stats_service=self.stats_service))
@@ -271,6 +275,47 @@ class MainWindow(QMainWindow):
         page = self.pages.currentWidget()
         if isinstance(page, LibraryPage):
             page.set_search(self._search.text())
+
+    # ---- 最近观看: 续播 / 进详情页 ----
+    def _on_resume_requested(self, item: dict):
+        """
+        首页「最近观看」点一行 → 从上次的进度直接续播。
+
+        episode_id 必须一起传: 动漫的进度写在 episodes 表, 不传的话
+        _save_progress 会把这一集的进度写到 media 表上, 看完动漫也永远
+        不进"已观看"统计 (详见 player._save_progress 的分支)。
+        """
+        path = item.get("file_path") or ""
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(
+                self, "无法续播",
+                f"找不到视频文件：\n{path or '（记录里没有文件路径）'}\n\n"
+                f"可以点该行的「详情」看看这个作品还有哪些文件。",
+            )
+            return
+        self.player_service.play(
+            file_path=path,
+            media_id=item.get("id"),
+            episode_id=item.get("episode_id"),
+            start_pos=int(item.get("position") or 0),
+        )
+
+    def _open_detail(self, media_id: int):
+        """
+        打开某部作品的详情页, 并销毁上一个。
+
+        原先 LibraryPage._on_card_clicked 每次点击都 pages.addWidget(DetailPage(...)),
+        旧页面既不隐藏也不销毁, 一直挂在 QStackedWidget 里 —— 点几十次就攒几十个
+        孤儿页, 内存只增不减。收拢到这里统一复用。
+        """
+        old = getattr(self, "_detail_page", None)
+        page = DetailPage(media_id, stats_service=self.stats_service)
+        self._detail_page = page
+        self.pages.addWidget(page)
+        self.pages.setCurrentWidget(page)
+        if old is not None:
+            self.pages.removeWidget(old)
+            old.deleteLater()
 
     # ---- 页面切换 ----
     def _on_page_changed(self, idx: int):

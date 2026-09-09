@@ -11,8 +11,25 @@ from typing import Dict, Any
 from sqlalchemy import func
 
 from app.database import get_session
-from app.models.tables import Media, MediaFile
-from app.utils.quality import best_hdr, has_chinese_subtitle
+from app.models.tables import Episode, Media, MediaFile, Season
+from app.utils.quality import best_hdr, fmt_dur, has_chinese_subtitle
+
+
+def progress_text(position, duration) -> str:
+    """
+    续播进度的可读文案。
+
+    原先 get_recently_watched 直接把 `f"{watched_position}/{watched_duration}s"`
+    甩到 UI 上, 于是首页显示 "1440/1440s" 这种东西。
+    """
+    pos, dur = int(position or 0), int(duration or 0)
+    if dur <= 0:
+        return f"看到 {fmt_dur(pos)}" if pos > 0 else "未记录进度"
+    if pos >= dur * 0.95:
+        return "已看完"
+    if pos <= 0:
+        return "尚未开始"
+    return f"看到 {fmt_dur(pos)} / {fmt_dur(dur)}"
 
 
 class StatsService:
@@ -79,24 +96,87 @@ class StatsService:
         return {"unwatched": unwatched, "watching": watching, "watched": watched}
 
     def get_recently_watched(self, limit: int = 10) -> list:
-        """最近观看记录 (按 last_watched_at 降序)"""
+        """
+        最近观看记录 (按 last_watched_at 降序)。
+
+        返回值带**续播所需的全部信息**: file_path / episode_id / position / duration。
+        原先只有 id/title/media_type/watched_at 和一个裸字符串 progress,
+        于是首页那几行既点不动、也看不出动漫看的是第几集
+        → 用户报"最近观看也无法点进去具体看的哪个继续看"。
+
+        ⚠️ 动漫的进度写在 episodes 表 (见 player._save_progress), media 表那份
+        只是"最后看的那一集"的镜像 —— 不回 episodes 查就不知道是哪一集,
+        也就没法把 episode_id 传给 PlayerService.play()。
+        """
         with get_session() as s:
             results = s.query(Media).filter(
                 Media.last_watched_at.isnot(None)
             ).order_by(Media.last_watched_at.desc()).limit(limit).all()
 
+            ids = [m.id for m in results]
+            ep_by_media, files_by_media = {}, {}
+            if ids:
+                # Episode 没有 media_id, 关系是 Episode → Season → Media
+                ep_rows = (
+                    s.query(Season.media_id, Episode.id, Episode.episode_number,
+                            Episode.watched_position, Episode.last_watched_at)
+                    .join(Season, Episode.season_id == Season.id)
+                    .filter(Season.media_id.in_(ids),
+                            Episode.last_watched_at.isnot(None))
+                    .order_by(Episode.last_watched_at.desc())
+                    .all()
+                )
+                for mid, eid, num, pos, _at in ep_rows:
+                    # 已按时间降序, 每部作品的第一条就是最近看的那一集
+                    ep_by_media.setdefault(mid, {
+                        "episode_id": eid, "episode_number": num,
+                        "position": pos or 0,
+                    })
+
+                # 文件路径一次取回, 不逐个 m.files 懒加载 (N+1 + 脱离会话后崩)
+                f_rows = s.query(
+                    MediaFile.media_id, MediaFile.id, MediaFile.file_path,
+                    MediaFile.episode_id, MediaFile.duration,
+                ).filter(MediaFile.media_id.in_(ids)).all()
+                for mid, fid, path, eid, dur in f_rows:
+                    files_by_media.setdefault(mid, []).append({
+                        "file_id": fid, "file_path": path,
+                        "episode_id": eid, "duration": dur or 0,
+                    })
+
             # 必须在会话内物化成纯 dict: 会话关闭后 ORM 实例即脱离,
             # 再访问任何未加载的属性都会 DetachedInstanceError。
-            return [
-                {
+            items = []
+            for m in results:
+                ep = ep_by_media.get(m.id) or {}
+                files = files_by_media.get(m.id, [])
+                # 动漫挑那一集对应的文件; 电影(或没匹配上)取第一个
+                pick = None
+                if ep.get("episode_id"):
+                    pick = next((f for f in files
+                                 if f["episode_id"] == ep["episode_id"]), None)
+                if pick is None and files:
+                    pick = files[0]
+                pick = pick or {}
+
+                position = ep.get("position") or (m.watched_position or 0)
+                duration = pick.get("duration") or (m.watched_duration or 0)
+                items.append({
                     "id": m.id,
                     "title": m.title,
                     "media_type": m.media_type,
-                    "watched_at": m.last_watched_at.isoformat() if m.last_watched_at else None,
-                    "progress": f"{m.watched_position}/{m.watched_duration}s",
-                }
-                for m in results
-            ]
+                    "poster": m.poster_path,
+                    "watched_at": (m.last_watched_at.isoformat()
+                                   if m.last_watched_at else None),
+                    "episode_id": ep.get("episode_id"),
+                    "episode_number": ep.get("episode_number"),
+                    "file_id": pick.get("file_id"),
+                    "file_path": pick.get("file_path"),
+                    "position": position,
+                    "duration": duration,
+                    "progress_text": progress_text(position, duration),
+                })
+            return items
 
     def get_media_title(self, media_id: int) -> str:
         """按 id 取标题 (给「正在播放」状态条用); 查不到返回空串"""

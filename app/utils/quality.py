@@ -339,9 +339,9 @@ def format_tech_line(f: dict) -> str:
         parts.append(subs)
 
     if f.get("duration"):
-        parts.append(_fmt_dur(f["duration"]))
+        parts.append(fmt_dur(f["duration"]))
     if f.get("file_size"):
-        parts.append(_fmt_size(f["file_size"]))
+        parts.append(fmt_size(f["file_size"]))
 
     return " · ".join(p for p in parts if p)
 
@@ -372,9 +372,9 @@ def tech_tooltip(f: dict) -> str:
         lines.append(f"容器: {f['container_format']}")
     tail = []
     if f.get("duration"):
-        tail.append(f"时长 {_fmt_dur(f['duration'])}")
+        tail.append(f"时长 {fmt_dur(f['duration'])}")
     if f.get("file_size"):
-        tail.append(f"体积 {_fmt_size(f['file_size'])}")
+        tail.append(f"体积 {fmt_size(f['file_size'])}")
     if tail:
         lines.append(" · ".join(tail))
 
@@ -384,7 +384,7 @@ def tech_tooltip(f: dict) -> str:
 # ----------------------------------------------------------------------
 # 单位格式化 (与 detail_page 里原有的保持一致, 集中到这里避免两份实现漂移)
 # ----------------------------------------------------------------------
-def _fmt_dur(seconds) -> str:
+def fmt_dur(seconds) -> str:
     seconds = int(seconds or 0)
     if seconds <= 0:
         return "—"
@@ -393,7 +393,7 @@ def _fmt_dur(seconds) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def _fmt_size(num_bytes) -> str:
+def fmt_size(num_bytes) -> str:
     size = float(num_bytes or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if size < 1024 or unit == "TB":

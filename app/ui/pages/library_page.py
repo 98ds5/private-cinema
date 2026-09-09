@@ -131,15 +131,22 @@ class LibraryPage(QWidget):
 
     def _on_card_clicked(self, media_id: int):
         """点击卡片 → 切换到详情页"""
-        from app.ui.pages.detail_page import DetailPage
         # 找到主窗口的 QStackedWidget 切换
         parent = self.parent()
         while parent and not hasattr(parent, 'pages'):
             parent = parent.parent()
-        if parent and hasattr(parent, 'pages'):
-            detail = DetailPage(media_id, stats_service=self.stats)
-            parent.pages.addWidget(detail)
-            parent.pages.setCurrentWidget(detail)
+        if not parent:
+            return
+        # 优先走 MainWindow._open_detail —— 它会销毁上一个详情页。
+        # 原先这里每次点击都 pages.addWidget(DetailPage(...)), 旧的既不隐藏也不销毁,
+        # 一直挂在 QStackedWidget 里: 点几十次就攒几十个孤儿页, 内存只增不减。
+        if hasattr(parent, '_open_detail'):
+            parent._open_detail(media_id)
+            return
+        from app.ui.pages.detail_page import DetailPage
+        detail = DetailPage(media_id, stats_service=self.stats)
+        parent.pages.addWidget(detail)
+        parent.pages.setCurrentWidget(detail)
 
     def set_search(self, text: str, refresh: bool = True):
         """
