@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 项目内 conda 环境（约 400 MB，用 conda create -p cinema_env 重建，见 README）
+cinema_env/
+
+# agent 工作目录（诊断脚本等临时产物）
+.openclaw/
+
+# IDE
+.idea/
+.vscode/
+
+# 运行时数据 / 本机配置
+data/
+config.json
+
+# 测试缓存
+.pytest_cache/
+
+# 打包产物
+build/
+dist/
+*.spec
