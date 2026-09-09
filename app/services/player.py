@@ -19,13 +19,14 @@ import json
 import os
 import platform
 import subprocess
+import threading
 import time
 import urllib.parse
+import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, Tuple
 
-from PySide6.QtCore import QObject, Signal, QTimer
+from PySide6.QtCore import QObject, Signal
 
 from app.database import get_session
 from app.models.tables import Media, Episode, MediaFile, Season
@@ -76,13 +77,22 @@ if platform.system() == "Windows":
 
     _kernel32.GetLastError.restype = wintypes.DWORD
 
-    _kernel32.SetNamedPipeHandleState.argtypes = [
+    # PeekNamedPipe: 先问管道里有多少可读字节, 再决定读多少。
+    # 没有它就只能阻塞式 ReadFile —— 管道空的时候会把调用线程整个挂死。
+    _kernel32.PeekNamedPipe.argtypes = [
         wintypes.HANDLE,            # hNamedPipe
-        ctypes.POINTER(wintypes.DWORD),  # lpMode
-        ctypes.c_void_p,            # lpMaxCollectionCount
-        ctypes.c_void_p,            # lpCollectDataTimeout
+        ctypes.c_void_p,            # lpBuffer
+        wintypes.DWORD,             # nBufferSize
+        ctypes.POINTER(wintypes.DWORD),  # lpBytesRead
+        ctypes.POINTER(wintypes.DWORD),  # lpTotalBytesAvail
+        ctypes.POINTER(wintypes.DWORD),  # lpBytesLeftThisMessage
     ]
-    _kernel32.SetNamedPipeHandleState.restype = wintypes.BOOL
+    _kernel32.PeekNamedPipe.restype = wintypes.BOOL
+
+    # 刻意不再声明 SetNamedPipeHandleState。
+    # 探针实测把客户端切到 PIPE_READMODE_MESSAGE 返回 ok=True (mpv 的管道接受),
+    # 但本模块自己按字节维护持久缓冲、按 \n 切行, 字节模式才是匹配的语义;
+    # 消息模式会让 ReadFile 在消息边界截断, 反而和自己的缓冲打架。
 
     _HAVE_NAMED_PIPE = True
 
@@ -91,7 +101,7 @@ if platform.system() == "Windows":
     GENERIC_WRITE = 0x40000000
     OPEN_EXISTING = 3
     FILE_ATTRIBUTE_NORMAL = 0x80
-    PIPE_READ_MODE = 0x0001  # PIPE_READMODE_MESSAGE
+    _INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
 
 
 # ========================================================================
@@ -149,33 +159,173 @@ def _save_progress(media_id: int, position: int, duration: int,
 
 
 # ========================================================================
+# MPV JSON IPC 的字节流解析 (纯函数 — 可单测, 是 B3 的最小 seam)
+# ========================================================================
+def _iter_json_lines(data: bytes) -> Tuple[list, bytes]:
+    """
+    把管道字节流按行切成 JSON 对象。
+
+    返回 (成功解析出的对象列表, 还没凑成完整一行的剩余字节)。
+    剩余字节**必须**由调用方存回缓冲 —— mpv 的一行 JSON 可能被拆到两次
+    ReadFile 里, 丢了半行就等于丢了那条回复。
+
+    坏行直接跳过: 一行乱码不该毁掉它后面所有正常数据。
+    """
+    objs = []
+    while b"\n" in data:
+        line, data = data.split(b"\n", 1)
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            objs.append(json.loads(line.decode("utf-8", "replace")))
+        except json.JSONDecodeError:
+            continue
+    return objs, data
+
+
+def _pick_reply(objects: list, request_id: int) -> Optional[dict]:
+    """
+    从混杂的对象流里挑出本次命令的回复, 丢弃 mpv 主动推的事件行。
+
+    判据是 request_id, 不是"第一个带 data 的"。事件行没有 request_id 字段,
+    命令回复一定有。反过来, 发命令时不带 request_id 的话回复里恒为 0,
+    和事件根本没法区分 —— 这就是为什么每条命令都必须分配唯一 id。
+    """
+    for o in objects:
+        if not isinstance(o, dict) or "event" in o:
+            continue
+        if o.get("request_id") == request_id:
+            return o
+    return None
+
+
+class _PipeReader:
+    """
+    命名管道上的 newline-delimited JSON 读写 (后台 IPC 线程专用)。
+
+    为什么不能"发一条命令、读一次、json.loads 整块":
+      mpv 会**主动推异步事件** (start-file / file-loaded / audio-reconfig ...),
+      和命令回复交错在同一次写入里。探针实测: 一次 get_property time-pos
+      读回 991 字节 / 11 行, 只有第 1 行是回复, 其余 10 行全是事件。
+      整块 json.loads 必然报 "Extra data: line 2 column 1" → 进度恒为 0。
+
+    为什么一律 PeekNamedPipe 而不直接 ReadFile:
+      同步管道上没数据时 ReadFile 会把调用线程挂死。挂死的 IPC 线程
+      表现为进度条永久停更, 而且没有任何报错。
+    """
+
+    def __init__(self, handle: int):
+        self._h = handle
+        self._buf = b""
+
+    def send(self, obj: dict) -> bool:
+        payload = (json.dumps(obj) + "\n").encode("utf-8")
+        written = wintypes.DWORD(0)
+        return bool(_kernel32.WriteFile(
+            self._h, payload, len(payload), ctypes.byref(written), None
+        ))
+
+    def pump(self) -> Tuple[list, bool]:
+        """非阻塞读走当前所有可读字节 → (解析出的 JSON 对象, 管道是否还活着)"""
+        objs: list = []
+        while True:
+            avail = wintypes.DWORD(0)
+            if not _kernel32.PeekNamedPipe(
+                    self._h, None, 0, None, ctypes.byref(avail), None):
+                return objs, False
+            if avail.value <= 0:
+                return objs, True
+            chunk = ctypes.create_string_buffer(avail.value)
+            got = wintypes.DWORD(0)
+            if not _kernel32.ReadFile(
+                    self._h, chunk, avail.value, ctypes.byref(got), None):
+                return objs, False
+            if got.value <= 0:
+                return objs, True
+            self._buf += chunk.raw[:got.value]
+            parsed, self._buf = _iter_json_lines(self._buf)
+            objs.extend(parsed)
+
+    def await_reply(self, request_id: int, timeout: float = 2.0):
+        """读到与 request_id 匹配的回复为止; 超时或断管返回 None"""
+        deadline = time.monotonic() + timeout
+        while True:
+            objs, alive = self.pump()
+            reply = _pick_reply(objs, request_id)
+            if reply is not None:
+                if reply.get("error") not in (None, "success"):
+                    return None
+                return reply.get("data")
+            if not alive or time.monotonic() >= deadline:
+                return None
+            time.sleep(0.02)
+
+    def close(self):
+        if self._h:
+            _kernel32.CloseHandle(self._h)
+            self._h = None
+
+
+# ========================================================================
 # 引擎: MPV (JSON IPC 命名管道)
 # ========================================================================
 class _MpvEngine(QObject):
-    """MPV 播放引擎 — 通过 JSON IPC 读取进度"""
+    """
+    MPV 播放引擎 — 通过 JSON IPC 读取进度。
+
+    线程模型 (2026-09-09 重写; 原实现三个 bug 叠加, 进度追踪从未生效过):
+      主线程    play()/stop()、全部信号槽、数据库写入
+      后台线程  _ipc_loop(): 连管道、轮询 time-pos/duration、只发信号
+
+    两条硬约束决定了必须是这个形状:
+      1. QTimer 不能在非 Qt 线程里 start。原实现在普通 threading.Thread 里调
+         _timer.start(), Qt 运行时实测直接打出
+         "QObject::startTimer: Timers cannot be started from another thread"
+         并且定时器永不触发 → _poll 一次都没执行过。
+      2. SQLite 连接不能跨线程复用 (pysqlite check_same_thread)。所以落库必须
+         留在主线程: 后台线程只发信号, 由主线程槽函数写库。
+    """
 
     playback_started = Signal(int)
     playback_position = Signal(int, int)
     playback_finished = Signal(int)
     playback_error = Signal(str)
 
+    # 后台 IPC 线程 → 主线程的私有通道 (跨线程自动走 queued connection)
+    _progress_ready = Signal(int, int)
+    _ipc_failed = Signal(str)
+    _process_exited = Signal()
+
     def __init__(self, config: dict, mpv_path: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.mpv_path = mpv_path or "mpv"
-        self.interval = config.get("player", {}).get("progress_interval", 10)
-        self.hw_decode = config.get("player", {}).get("hw_decode", "auto")
+        player_cfg = config.get("player", {}) or {}
+
+        # 轮询间隔(秒)。0 或非法值一律退回 10, 否则后台线程会变成忙等。
+        try:
+            self.interval = float(player_cfg.get("progress_interval", 10))
+        except (TypeError, ValueError):
+            self.interval = 10.0
+        if self.interval <= 0:
+            self.interval = 10.0
+        self.hw_decode = player_cfg.get("hw_decode", "auto")
 
         self._process: Optional[subprocess.Popen] = None
-        self._pipe_handle: Optional[int] = None  # Windows HANDLE
         self._media_id: Optional[int] = None
         self._episode_id: Optional[int] = None
         self._position = 0
         self._duration = 0
         self._playing = False
         self._pipe_name = ""
+        self._connect_error = 0
+        self._next_request_id = 0
+        self._ipc_thread: Optional[threading.Thread] = None
+        self._stop_evt = threading.Event()
 
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._poll)
+        self._progress_ready.connect(self._on_progress)
+        self._ipc_failed.connect(self._on_ipc_failed)
+        self._process_exited.connect(self._on_process_exited)
 
     @property
     def is_playing(self) -> bool:
@@ -190,9 +340,12 @@ class _MpvEngine(QObject):
         self._episode_id = episode_id
         self._position = start_pos
         self._duration = 0
+        self._next_request_id = 0
 
-        # 命名管道路径 (Windows)
-        self._pipe_name = rf"\\.\pipe\mpv-pc-{media_id}"
+        # 管道名每次播放必须唯一。
+        # 原先是 \\.\pipe\mpv-pc-{media_id}: 上一轮残留的 mpv 进程还占着同名管道时,
+        # CreateFileW 会连到**别人的 mpv** 上, 读回来的是别的片子的进度。
+        self._pipe_name = rf"\\.\pipe\mpv-pc-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
         cmd = [
             self.mpv_path,
@@ -201,6 +354,16 @@ class _MpvEngine(QObject):
             "--keep-open=yes",
             "--no-border",
             "--geometry=50%+10%+10%",  # 居中偏上
+            # 关掉 mpv 自带的观看位置记忆, 让本 app 的数据库成为唯一事实来源。
+            # 实测 (mpv-lazy 的 portable_config\mpv.conf 里有
+            # save-position-on-quit=yes + watch-later-options=start,...):
+            # 不关的话, 即使我们不传 --start, mpv 也会从它自己缓存的位置接着放
+            # —— 真机验证时 start_pos=0 的一轮首个 time-pos 是 625 而不是 0。
+            # 那样续播到底听谁的就不确定了, 两边记录还会各自漂移。
+            # 命令行优先级高于 mpv.conf, 所以这两条能压住用户的全局配置,
+            # 同时不动他的 uosc / 上色 / 着色器等其它设置。
+            "--no-resume-playback",
+            "--save-position-on-quit=no",
         ]
         if start_pos > 0:
             cmd.append(f"--start={start_pos}")
@@ -210,167 +373,178 @@ class _MpvEngine(QObject):
             self._process = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            self._playing = True
-            self.playback_started.emit(media_id)
+        except (FileNotFoundError, OSError) as e:
+            # 原先只捕 FileNotFoundError: mpv 路径指向目录或损坏的 exe 时
+            # 抛的是别的 OSError, 会一路穿出 Qt 槽函数, 表现为"点了没反应"。
+            self._process = None
+            self.playback_error.emit(f"无法启动 MPV: {self.mpv_path} ({e})")
+            return
 
-            # 后台线程: 连接命名管道
-            threading.Thread(target=self._connect, daemon=True).start()
+        self._playing = True
+        self._stop_evt.clear()
+        self.playback_started.emit(media_id)
 
-        except FileNotFoundError:
-            self.playback_error.emit(f"未找到 MPV: {self.mpv_path}")
+        self._ipc_thread = threading.Thread(
+            target=self._ipc_loop, daemon=True, name="mpv-ipc"
+        )
+        self._ipc_thread.start()
 
     def stop(self):
+        """停止播放: 通知后台线程收尾 → 等它退出 → 确保进程结束 → 落盘"""
         if not self._playing:
             return
         self._playing = False
-        self._timer.stop()
+        self._stop_evt.set()
 
-        # 发 quit 命令
-        if self._pipe_handle:
-            try:
-                self._send_raw(json.dumps({"command": ["quit"]}) + "\n")
-            except Exception:
-                pass
-            self._close_pipe()
+        # quit 命令和管道句柄都归后台线程管 (它在 finally 里发 quit 再 close),
+        # 所以必须先 join, 否则句柄会被两边同时关闭。
+        t = self._ipc_thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=4)
+        self._ipc_thread = None
 
-        # 兜底: 等进程退出
-        if self._process:
+        proc = self._process
+        if proc is not None:
             try:
-                self._process.wait(timeout=3)
+                proc.wait(timeout=3)
             except Exception:
-                try:
-                    self._process.kill()
-                except Exception:
-                    pass
+                # quit 没送达 (例如管道从未连上) → 逐级升级强杀
+                for killer in (proc.terminate, proc.kill):
+                    try:
+                        killer()
+                        proc.wait(timeout=2)
+                        break
+                    except Exception:
+                        continue
             self._process = None
 
         self._save()
 
-    # ---- 命名管道通信 ----
+    # ---- 后台 IPC 线程 ----
 
-    def _connect(self):
-        """后台线程: 等待 MPV 创建管道, 然后连接"""
-        if platform.system() != "Windows" or not _HAVE_NAMED_PIPE:
-            self.playback_error.emit("MPV JSON IPC 当前仅支持 Windows (命名管道)")
+    def _ipc_loop(self):
+        """
+        后台线程主体: 连管道 → 按 interval 轮询 → 只发信号。
+
+        绝不在这个线程里碰 QTimer、QWidget 或数据库 (理由见类 docstring)。
+        """
+        proc = self._process
+        pos = self._position      # play() 在 start() 前写好, 线程启动即 happens-before
+        dur = 0
+
+        handle = self._connect_pipe()
+        if handle is None:
+            if not self._stop_evt.is_set():
+                self._ipc_failed.emit(
+                    f"连接 MPV 命名管道失败 ({self._pipe_name}, "
+                    f"error={self._connect_error})"
+                )
             return
 
-        # 等 MPV 创建管道 (最多 3 秒)
-        for _ in range(30):
-            if not self._playing:
-                return
-            time.sleep(0.1)
+        reader = _PipeReader(handle)
+        try:
+            last = 0.0            # 0 → 进循环立刻轮询一次, 之后按 interval
+            while not self._stop_evt.is_set():
+                if proc is not None and proc.poll() is not None:
+                    # 用户直接关掉了 mpv 窗口。
+                    # 先把最后一轮已知进度投出去再报退出: 两个信号都是 queued,
+                    # 主线程按序处理, 这样不会丢掉最后 interval 秒的进度。
+                    if pos or dur:
+                        self._progress_ready.emit(pos, dur)
+                    self._process_exited.emit()
+                    return
 
-        handle = _kernel32.CreateFileW(
-            self._pipe_name,
-            GENERIC_READ | GENERIC_WRITE,
-            0,               # 不共享
-            None,            # 默认安全属性
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )
-        if handle == wintypes.HANDLE(-1).value or not handle:
-            err = _kernel32.GetLastError()
-            self.playback_error.emit(f"连接 MPV 命名管道失败 (error={err})")
-            return
+                if time.monotonic() - last >= self.interval:
+                    last = time.monotonic()
+                    new_pos = self._query(reader, "time-pos")
+                    if new_pos is not None:
+                        pos = int(float(new_pos))
+                    if dur == 0:                      # 总时长只查一次
+                        new_dur = self._query(reader, "duration")
+                        if new_dur:
+                            dur = int(float(new_dur))
+                    if new_pos is not None or dur:
+                        self._progress_ready.emit(pos, dur)
+                else:
+                    # 非轮询轮次也要排空管道: mpv 会持续推事件,
+                    # 不读走会让缓冲区堆积, 下次 await_reply 读到一堆陈年事件。
+                    reader.pump()
+                self._stop_evt.wait(0.05)
+        finally:
+            if self._stop_evt.is_set():
+                reader.send({"command": ["quit"]})    # 优雅关窗
+            reader.close()
 
-        self._pipe_handle = handle
+    def _connect_pipe(self, timeout: float = 10.0) -> Optional[int]:
+        """
+        等 mpv 把管道建出来并连上, 返回 HANDLE (失败返回 None)。
 
-        # 切换到消息读取模式
-        PIPE_READ_MODE = 0x0001
-        c_mode = wintypes.DWORD(PIPE_READ_MODE)
-        _kernel32.SetNamedPipeHandleState(
-            handle, ctypes.byref(c_mode), None, None
-        )
-
-        # 启动定时轮询
-        self._timer.start(self.interval * 1000)
-
-    def _send_raw(self, data: str) -> bool:
-        """发送原始数据到命名管道"""
-        if not self._pipe_handle:
-            return False
-        buf = data.encode("utf-8")
-        written = wintypes.DWORD(0)
-        ok = _kernel32.WriteFile(
-            self._pipe_handle,
-            buf,
-            len(buf),
-            ctypes.byref(written),
-            None,
-        )
-        return bool(ok)
-
-    def _read_response(self) -> Optional[str]:
-        """从命名管道读取一行响应"""
-        if not self._pipe_handle:
-            return None
-        buf = ctypes.create_string_buffer(4096)
-        read = wintypes.DWORD(0)
-        ok = _kernel32.ReadFile(
-            self._pipe_handle,
-            buf,
-            ctypes.sizeof(buf),
-            ctypes.byref(read),
-            None,
-        )
-        if ok and read.value > 0:
-            return buf.raw[:read.value].decode("utf-8", errors="replace").strip()
+        必须循环重试: 实测 mpv 从启动到管道可用要 0.69s / 3 次尝试
+        (前两次 error=2 ERROR_FILE_NOT_FOUND)。原实现是盲 sleep 满 3 秒后
+        **只连一次** —— 冷启动大文件时必然失败, 而且每次都白等 3 秒。
+        """
+        self._connect_error = 0
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._stop_evt.is_set():
+                return None
+            h = _kernel32.CreateFileW(
+                self._pipe_name,
+                GENERIC_READ | GENERIC_WRITE,
+                0,               # 不共享
+                None,            # 默认安全属性
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+            if h and h != _INVALID_HANDLE_VALUE:
+                return h
+            self._connect_error = ctypes.get_last_error()
+            self._stop_evt.wait(0.1)
         return None
 
-    def _send_command(self, command: list) -> Optional[dict]:
-        """发送 JSON IPC 命令并解析响应"""
-        payload = json.dumps({"command": command}) + "\n"
-        if not self._send_raw(payload):
+    def _query(self, reader: _PipeReader, prop: str, timeout: float = 2.0):
+        """
+        发一条 get_property 并取回 data。
+
+        必须带唯一 request_id: mpv 主动推的事件行与命令回复交错 (实测一次
+        回复夹带 10 行事件), 不带 id 时所有回复的 request_id 恒为 0,
+        根本无法判断哪一行对应本次命令。
+        """
+        self._next_request_id += 1
+        rid = self._next_request_id
+        if not reader.send({"command": ["get_property", prop], "request_id": rid}):
             return None
-        resp = self._read_response()
-        if resp:
-            try:
-                return json.loads(resp)
-            except json.JSONDecodeError:
-                pass
-        return None
+        return reader.await_reply(rid, timeout)
 
-    def _close_pipe(self):
-        if self._pipe_handle:
-            _kernel32.CloseHandle(self._pipe_handle)
-            self._pipe_handle = None
+    # ---- 主线程槽函数 (后台线程只发信号, 状态变更与落库全在这里) ----
 
-    # ---- 轮询与保存 ----
-
-    def _poll(self):
-        """定时器回调: 读取 time-pos 和 duration"""
-        if not self._playing or not self._pipe_handle:
+    def _on_progress(self, position: int, duration: int):
+        if not self._playing:
             return
-
-        # 检查进程是否还活着
-        if self._process and self._process.poll() is not None:
-            # MPV 已退出
-            self._timer.stop()
-            self._playing = False
-            self._save()
-            self.playback_finished.emit(self._media_id)
-            self._close_pipe()
-            return
-
-        # 查询播放位置
-        resp = self._send_command(["get_property", "time-pos"])
-        if resp and "data" in resp:
-            self._position = int(float(resp["data"]))
-
-        # 查询总时长 (只查一次)
-        if self._duration == 0:
-            resp2 = self._send_command(["get_property", "duration"])
-            if resp2 and "data" in resp2:
-                self._duration = int(float(resp2["data"]))
-
+        if position:
+            self._position = position
+        if duration:
+            self._duration = duration
         self.playback_position.emit(self._position, self._duration)
+        self._save()          # 每轮都落库, 防止崩溃丢进度
 
-        # 每轮询也落库一次 (防止崩溃丢进度)
+    def _on_ipc_failed(self, message: str):
+        if self._playing:
+            self.playback_error.emit(message)
+
+    def _on_process_exited(self):
+        """mpv 进程没了 (用户关窗) → 落盘 + 通知 UI 清状态条"""
+        if not self._playing:
+            return
+        self._playing = False
+        self._stop_evt.set()
+        self._process = None
         self._save()
+        self.playback_finished.emit(self._media_id)
 
     def _save(self):
-        """保存当前进度到数据库"""
+        """保存当前进度到数据库 (只能在主线程调: SQLite 连接不跨线程)"""
         _save_progress(
             media_id=self._media_id,
             position=self._position,
