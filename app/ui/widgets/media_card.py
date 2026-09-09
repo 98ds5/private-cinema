@@ -16,11 +16,14 @@ class MediaCard(QFrame):
 
     # 卡片是固定尺寸, 加了一行角标就要从海报区借高度, 否则三个 QLabel 会被压扁
     POSTER_H = 132
+    # 尺寸提成类常量: LibraryPage 要靠它算"一行能放几列", 别再各写各的魔数
+    CARD_W = 160
+    CARD_H = 200
 
     def __init__(self, media: dict = None, parent=None):
         super().__init__(parent)
         self.setObjectName("mediaCard")
-        self.setFixedSize(160, 200)
+        self.setFixedSize(self.CARD_W, self.CARD_H)
         self._media_id = media.get("id") if media else None
 
         layout = QVBoxLayout(self)

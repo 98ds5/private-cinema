@@ -19,6 +19,9 @@ _TITLES = {"all": "全部影视", "movie": "电影", "anime": "动漫", "recent"
 
 
 class LibraryPage(QWidget):
+    GRID_SPACING = 16          # 网格间距; 同时用于算"一行放得下几列"
+    REFLOW_DEBOUNCE_MS = 60    # 拖窗口时重排的防抖: 每个像素都会来一次 resizeEvent
+
     def __init__(self, view: str = "all",
                  stats_service: Optional[StatsService] = None,
                  parent=None):
@@ -69,9 +72,16 @@ class LibraryPage(QWidget):
         # 内容被裁 (实测 host 490 vs 需要 848)。顶部对齐改用底部弹性行实现。
         self._grid_host = QWidget()
         self._grid = QGridLayout(self._grid_host)
-        self._grid.setSpacing(16)
+        self._grid.setSpacing(self.GRID_SPACING)
         self._grid.setContentsMargins(0, 0, 8, 0)
         self._cards = []
+        self._cols = 0                 # 当前列数; 0 = 还没排过
+
+        # 拖窗口时重排的防抖定时器 (认 self 当爹, 页面销毁自动停)
+        self._reflow_timer = QTimer(self)
+        self._reflow_timer.setSingleShot(True)
+        self._reflow_timer.setInterval(self.REFLOW_DEBOUNCE_MS)
+        self._reflow_timer.timeout.connect(self._reflow)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -79,6 +89,11 @@ class LibraryPage(QWidget):
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setWidget(self._grid_host)
         layout.addWidget(self._scroll, stretch=1)
+
+        # 竖向滚动条出现/消失会改变视口宽度, 但**不会**给 LibraryPage 发 resizeEvent,
+        # 所以这里也得触发一次重排, 否则列数按"没有滚动条"的宽度算, 卡片会被滚动条压住。
+        self._scroll.verticalScrollBar().rangeChanged.connect(
+            lambda *_: self._reflow_timer.start())
 
         # 延迟加载（等窗口显示后再查数据）
         # ⚠️ 必须传 self 作为 context 对象: 不带 context 的 singleShot 在页面销毁后
@@ -127,16 +142,68 @@ class LibraryPage(QWidget):
             card.deleteLater()
         self._cards.clear()
 
-        for i, item in enumerate(items):
+        for item in items:
             card = MediaCard(item)
             card.clicked.connect(self._on_card_clicked)
+            self._cards.append(card)
+
+        # "建卡片"和"摆卡片"分开: 摆的位置只由当前列数决定, 窗口一改就能重摆,
+        # 不必把 15 张卡片全销毁重建 (那样每拖一下窗口都要重跑一遍数据渲染)。
+        self._cols = self._cols_for(self._viewport_width())
+        self._place_cards()
+
+    # ------------------------------------------------------------------
+    # 响应式网格
+    #
+    # 原来列数是写死的 `i // 4, i % 4`: 窗口缩到最小和拉到全屏都是 4 列,
+    # 卡片一样大、结构一样 —— 全屏时右边一大片空白, 缩小时横向挤不下。
+    # ------------------------------------------------------------------
+    def _viewport_width(self) -> int:
+        """网格真正能用的宽度 = 滚动区视口宽 - 网格左右边距(右边距留给竖向滚动条)"""
+        m = self._grid.contentsMargins()
+        return self._scroll.viewport().width() - m.left() - m.right()
+
+    def _cols_for(self, width: int) -> int:
+        """
+        按可用宽度算一行放几列。卡片是固定宽, 所以就是"塞得下几个"。
+        先加一个间距再整除是标准 grid 算法: n 个卡片占 n*W + (n-1)*S。
+        """
+        if width <= 0:
+            # 还没显示过时 viewport 宽度是 0, 别据此把列数打成 1 (之后又要抖回去)
+            return self._cols or 1
+        step = MediaCard.CARD_W + self.GRID_SPACING
+        return max(1, (width + self.GRID_SPACING) // step)
+
+    def _place_cards(self):
+        """按 self._cols 把卡片摆进网格。重排必须先 removeWidget, 否则 addWidget 会加第二份。"""
+        cols = self._cols or 1
+        for i, card in enumerate(self._cards):
+            self._grid.removeWidget(card)
             # 卡片是固定尺寸, 指定对齐避免在单元格里被拉变形或错位。
             # 顶部对齐靠这个单元格级 AlignTop 实现 —— 不要给 grid 设
             # setAlignment(), 也不要加底部弹性行 setRowStretch():
             # 两者都会让 QScrollArea(widgetResizable) 改用视口高度而不是
             # minimumSizeHint, 滚动条上限恒为 0、下方卡片被裁掉点不到。
-            self._grid.addWidget(card, i // 4, i % 4, Qt.AlignTop | Qt.AlignLeft)
-            self._cards.append(card)
+            self._grid.addWidget(card, i // cols, i % cols, Qt.AlignTop | Qt.AlignLeft)
+
+    def _reflow(self):
+        """
+        窗口宽度变了 → 重算列数 → 只在**列数真的变了**时重摆。
+
+        这个守卫同时是滚动条震荡的收敛条件: 列数变少 → 内容变高 → 滚动条出现 →
+        视口变窄 → 可能再少一列。每轮列数严格变化, 几轮就到不动点;
+        没有守卫就会在两个列数之间来回抖。
+        """
+        cols = self._cols_for(self._viewport_width())
+        if cols == self._cols:
+            return
+        self._cols = cols
+        self._place_cards()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 拖动窗口时每个像素都会来一次 resizeEvent, 直接重排会卡 → 防抖
+        self._reflow_timer.start()
 
     def _on_card_clicked(self, media_id: int):
         """点击卡片 → 切换到详情页"""
