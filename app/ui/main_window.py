@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QComboBox, QSpacerItem, QSizePolicy,
     QMessageBox,
 )
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtCore import Qt, QPoint, QTimer
 from PySide6.QtGui import QMouseEvent, QCursor
 
 from app.ui.styles import (
@@ -44,6 +44,7 @@ HT_BOTTOMLEFT = 16
 HT_BOTTOMRIGHT = 17
 
 NAV_ITEMS = ["首页", "全部影视", "电影", "动漫", "最近观看", "设置"]
+NAV_ALL_ROW = 1      # 「全部影视」在侧边栏与页面栈里的下标 (回车全库搜索时跳这里)
 
 
 class TrafficLightButtons(QFrame):
@@ -192,12 +193,26 @@ class MainWindow(QMainWindow):
         hh = QHBoxLayout(header)
         hh.setContentsMargins(16, 0, 16, 0)
 
-        search = QLineEdit()
-        search.setObjectName("searchBox")
-        search.setPlaceholderText("搜索影视名称...")
-        hh.addWidget(search)
+        # 顶部全局搜索框 —— 全站唯一的搜索入口。
+        # 原先这里是局部变量 `search`: 没存成属性、没连任何信号、没有 handler,
+        # 是一个永远不起作用却在每个页面都显示的输入框 (用户报"搜索框不能用")。
+        # 同时 LibraryPage 内部还有一个接好的搜索框, 于是库页面上会出现两个。
+        # 现在: 输入即过滤当前库页; 不在库页面时回车跳到「全部影视」再过滤。
+        self._search = QLineEdit()
+        self._search.setObjectName("searchBox")
+        self._search.setPlaceholderText("搜索影视名称...（回车在全库中搜索）")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._on_search_changed)
+        self._search.returnPressed.connect(self._on_search_enter)
+        hh.addWidget(self._search)
         hh.addStretch()
         main_layout.addWidget(header)
+
+        # 防抖: textChanged 每个字符都触发, 直接查库 + 重建全部卡片会随片源增多越来越卡
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(200)
+        self._search_debounce.timeout.connect(self._apply_search)
 
         # ---- 主体 ----
         body = QWidget()
@@ -205,10 +220,12 @@ class MainWindow(QMainWindow):
         b_layout.setContentsMargins(0, 0, 0, 0)
         b_layout.setSpacing(0)
 
-        nav = QListWidget()
-        nav.setObjectName("sidebar")
+        # 存成属性: 顶部搜索框回车时要能跳到「全部影视」。
+        # 原先 nav 是局部变量, 出了这个函数就再也拿不到侧边栏。
+        self._nav = QListWidget()
+        self._nav.setObjectName("sidebar")
         for label in NAV_ITEMS:
-            nav.addItem(QListWidgetItem(label))
+            self._nav.addItem(QListWidgetItem(label))
 
         self.pages = QStackedWidget()
         self._home_page = HomePage(stats_service=self.stats_service)
@@ -222,10 +239,10 @@ class MainWindow(QMainWindow):
             mpv_path=self.mpv_path, player_service=self.player_service,
         ))
 
-        nav.currentRowChanged.connect(self._on_page_changed)
-        nav.setCurrentRow(0)
+        self._nav.currentRowChanged.connect(self._on_page_changed)
+        self._nav.setCurrentRow(0)
 
-        b_layout.addWidget(nav)
+        b_layout.addWidget(self._nav)
         b_layout.addWidget(self.pages, stretch=1)
         main_layout.addWidget(body, stretch=1)
 
@@ -235,6 +252,25 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self._now_bar)
 
         self.setCentralWidget(central)
+
+    # ---- 全局搜索 ----
+    def _on_search_changed(self, _text: str):
+        """输入即过滤, 但防抖 200ms"""
+        self._search_debounce.start()
+
+    def _on_search_enter(self):
+        """回车: 当前不在库页面时, 跳到「全部影视」再按关键词过滤"""
+        self._search_debounce.stop()
+        if self._search.text().strip() and \
+                not isinstance(self.pages.currentWidget(), LibraryPage):
+            self._nav.setCurrentRow(NAV_ALL_ROW)   # 触发 _on_page_changed, 那里会带上关键词
+            return
+        self._apply_search()
+
+    def _apply_search(self):
+        page = self.pages.currentWidget()
+        if isinstance(page, LibraryPage):
+            page.set_search(self._search.text())
 
     # ---- 页面切换 ----
     def _on_page_changed(self, idx: int):
@@ -247,6 +283,10 @@ class MainWindow(QMainWindow):
         """
         self.pages.setCurrentIndex(idx)
         page = self.pages.widget(idx)
+        # 搜索框是全站的, 切页要把当前关键词带过去。
+        # refresh=False: 紧接着下面会统一刷一次, 别把同一份数据查两遍。
+        if isinstance(page, LibraryPage):
+            page.set_search(self._search.text(), refresh=False)
         refresh = getattr(page, "refresh", None)
         if callable(refresh):
             refresh()

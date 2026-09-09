@@ -23,6 +23,7 @@ from app.database import get_session, init_database
 from app.models.tables import Media
 from app.services.player import PlayerService, _MpvEngine, _VividPlayerEngine
 from app.ui.main_window import MainWindow
+from app.ui import main_window as mw_mod
 from app.ui.pages import settings_page as settings_mod
 from app.ui.pages.detail_page import DetailPage
 from app.ui.pages.settings_page import SettingsPage
@@ -32,12 +33,43 @@ from app.utils.path_detector import detect_ffprobe, detect_mpv
 TAG = "[smoke]"
 
 
+class _NoModal:
+    """
+    顶掉 main_window 模块里的 QMessageBox。
+
+    ⚠️ 离屏脚本绝不能弹模态框: QMessageBox.warning 内部是 exec(), 会**永久阻塞**
+    事件循环, 脚本挂死 (2026-09-09 实际发生过: pwsh 300s 超时), 而且在用户屏幕上
+    弹出真窗口。触发路径是 set_engine("非法值") → playback_error →
+    main_window._on_playback_error → QMessageBox.warning。
+
+    生产代码弹这个框是对的(HANDOFF: 播放失败绝不静默), 要改的是诊断工具。
+    只替换 main_window 模块内的那个名字, 不动全局 PySide6。
+    """
+    calls = []
+
+    @staticmethod
+    def warning(parent, title, text, *a, **k):
+        _NoModal.calls.append((title, str(text)))
+        log(f"      [拦截模态框] {title}: {text}")
+        return 0x00000400          # QMessageBox.StandardButton.Ok
+
+    @staticmethod
+    def information(parent, title, text, *a, **k):
+        _NoModal.calls.append((title, str(text)))
+        return 0x00000400
+
+    @staticmethod
+    def question(*a, **k):
+        return 0x00000400
+
+
 def log(*a):
     print(TAG, *a, flush=True)
 
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
+    mw_mod.QMessageBox = _NoModal      # 必须在建 MainWindow 之前顶掉, 见 _NoModal 文档
     cfg = load_config()
     log("config keys:", sorted(cfg.keys()))
 
@@ -116,7 +148,13 @@ def main():
     for _ in range(3):
         app.processEvents()
     ok.append(("切回原引擎", ps.engine_type == start_engine))
+
+    # 非法引擎: 必须被拒, 而且必须**发信号**而不是静默 —— 但那个信号在
+    # MainWindow 里接的是模态框, 所以本脚本开头已经把 mw_mod.QMessageBox 顶掉了。
+    _NoModal.calls.clear()
     ok.append(("非法引擎被拒", ps.set_engine("vlc") is False))
+    ok.append(("非法引擎会报错而不是静默 (且没弹模态框卡死脚本)",
+               any("vlc" in t for _, t in _NoModal.calls)))
     sp.deleteLater()
 
     # 热切换后重建的引擎同样要能收进度 (_build_engine 走的是同一个 __init__)

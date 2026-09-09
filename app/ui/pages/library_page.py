@@ -8,7 +8,7 @@ from typing import Optional
 
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QGridLayout,
-    QLineEdit, QComboBox, QScrollArea,
+    QComboBox, QScrollArea,
 )
 from PySide6.QtCore import Qt, QTimer
 
@@ -40,12 +40,12 @@ class LibraryPage(QWidget):
         header.addWidget(title)
         header.addStretch()
 
-        self._search = QLineEdit()
-        self._search.setObjectName("searchBox")
-        self._search.setPlaceholderText("搜索...")
-        self._search.setFixedWidth(180)
-        self._search.textChanged.connect(self._on_search)
-        header.addWidget(self._search)
+        # 页面内不再有搜索框。
+        # 原先这里有一个**接好的** QLineEdit, 而 main_window 顶部还有一个
+        # **没接线的**同名搜索框 —— 库页面上会同时出现两个搜索框, 而用户先看到、
+        # 先去点的那个恰好是死的。现在搜索统一由顶部全局框驱动
+        # (MainWindow._apply_search → LibraryPage.set_search)。
+        self._search_text = ""
 
         self._sort = QComboBox()
         self._sort.addItems(["名称", "年份", "添加时间", "最近观看"])
@@ -96,7 +96,7 @@ class LibraryPage(QWidget):
 
             result = self.stats.get_library_list(
                 media_type=media_type,
-                search=self._search.text().strip() or None,
+                search=self._search_text or None,
                 sort=sort,
                 limit=100,
             )
@@ -141,8 +141,19 @@ class LibraryPage(QWidget):
             parent.pages.addWidget(detail)
             parent.pages.setCurrentWidget(detail)
 
-    def _on_search(self, text):
-        self.refresh()
+    def set_search(self, text: str, refresh: bool = True):
+        """
+        设置过滤关键词, 由 MainWindow 的顶部全局搜索框调用。
+
+        refresh=False 用于"切页后紧接着会统一 refresh 一次"的场景,
+        免得同一份数据查两遍。
+        """
+        text = (text or "").strip()
+        if text == self._search_text:
+            return
+        self._search_text = text
+        if refresh:
+            self.refresh()
 
     def _on_sort(self, text):
         self.refresh()
