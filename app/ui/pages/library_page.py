@@ -77,6 +77,22 @@ class LibraryPage(QWidget):
         self._cards = []
         self._cols = 0                 # 当前列数; 0 = 还没排过
 
+        # 行间距会被窗口高度拉伸的根因: QScrollArea(widgetResizable=True) 把宿主
+        # 撑到 max(视口尺寸, minimumSizeHint), 窗口一高, 多出来的高度就被 QGridLayout
+        # **平摊到每一行** → 卡片之间的竖间距跟着变大(实测 9 列时行间距 447px, 应为 16px)。
+        # 列数变多后行数变少(15 部从 4 行变 2 行), 同样的多余高度摊到更少的行上,
+        # 缝隙格外明显 —— 所以这毛病是响应式网格上线后才被看见的。
+        #
+        # 修法: 宿主外面再套一层 QVBoxLayout, 网格拿自己的 sizeHint 高度,
+        # **尾部 addStretch() 把剩下的高度全吃掉**。
+        # 不要用 grid.setRowStretch() —— 那是 §4.7 的红线; 尾部 addStretch() 才是许可写法。
+        self._scroll_widget = QWidget()
+        self._outer = QVBoxLayout(self._scroll_widget)
+        self._outer.setContentsMargins(0, 0, 0, 0)
+        self._outer.setSpacing(0)
+        self._outer.addWidget(self._grid_host)
+        self._outer.addStretch(1)
+
         # 拖窗口时重排的防抖定时器 (认 self 当爹, 页面销毁自动停)
         self._reflow_timer = QTimer(self)
         self._reflow_timer.setSingleShot(True)
@@ -87,7 +103,7 @@ class LibraryPage(QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._scroll.setWidget(self._grid_host)
+        self._scroll.setWidget(self._scroll_widget)
         layout.addWidget(self._scroll, stretch=1)
 
         # 竖向滚动条出现/消失会改变视口宽度, 但**不会**给 LibraryPage 发 resizeEvent,

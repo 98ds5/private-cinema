@@ -35,14 +35,28 @@ def app():
     yield a
 
 
-def _settle(app, page, width=None, seconds=0.4):
-    """改宽度并**真实等过**防抖(60ms)+布局生效, 紧循环 processEvents 是等不到的"""
-    if width is not None:
-        page.resize(width, 700)
+def _settle(app, page, width=None, seconds=0.4, height=None):
+    """改尺寸并**真实等过**防抖(60ms)+布局生效, 紧循环 processEvents 是等不到的"""
+    if width is not None or height is not None:
+        page.resize(width if width is not None else page.width(),
+                    height if height is not None else page.height())
     deadline = time.time() + seconds
     while time.time() < deadline:
         app.processEvents()
         time.sleep(0.01)
+
+
+def _row_gap(page):
+    """
+    第 0 行底部到第 1 行顶部的实际像素距离。
+
+    卡片的 y() 是相对父级(_grid_host)的, 两张卡同一个爹, 可以直接相减。
+    """
+    cols = page._cols
+    if len(page._cards) <= cols:
+        return None                      # 只有一行, 无从谈起行间距
+    top, second = page._cards[0], page._cards[cols]
+    return second.y() - (top.y() + top.height())
 
 
 def _pos_of(grid, card):
@@ -292,6 +306,67 @@ class TestScrollAreaRedLines:
         sb = page._scroll.verticalScrollBar()
         assert sb.maximum() > 0, \
             f"滚动条上限是 0 (max={sb.maximum()}), 下面的卡片看不到也点不到"
+
+
+# ==========================================================================
+# 行间距: 用户报「相邻列之间没问题, 但行之间有问题, 距离会随着窗口变大拉伸」
+#
+# 根因: QScrollArea(widgetResizable=True) 把宿主撑到 max(视口, minimumSizeHint),
+# 窗口一高, 多出来的高度就被 QGridLayout 平摊到每一行 → 竖间距跟着变大。
+# 列数变多以后行数变少(15 部从 4 行变 2 行), 同样的多余高度摊到更少的行上,
+# 缝隙就格外明显 —— 所以这个毛病是响应式网格上线后才被看见的。
+# ==========================================================================
+class TestRowSpacing:
+    def test_row_gap_is_constant_across_window_heights(self, app, page):
+        gaps = []
+        for h in (500, 700, 1000, 1400, 1800):
+            _settle(app, page, 900, 0.35, height=h)
+            g = _row_gap(page)
+            assert g is not None, f"高度 {h} 下只有一行, 测不出行间距"
+            gaps.append((h, g))
+        vals = {g for _, g in gaps}
+        assert len(vals) == 1, f"行间距随窗口高度变了(应该恒为 {LibraryPage.GRID_SPACING}): {gaps}"
+        assert vals.pop() == LibraryPage.GRID_SPACING
+
+    def test_row_gap_is_constant_across_column_counts(self, app, page):
+        """列数变多 → 行数变少, 多余高度摊到更少的行上, 缝隙会更夸张"""
+        gaps = []
+        for w in (500, 900, 1300, 1700):
+            _settle(app, page, w, 0.35, height=1400)
+            g = _row_gap(page)
+            if g is not None:
+                gaps.append((w, page._cols, g))
+        assert gaps, "一个能测出行间距的宽度都没有"
+        vals = {g for _, _, g in gaps}
+        assert len(vals) == 1, f"行间距随列数变了: {gaps}"
+        assert vals.pop() == LibraryPage.GRID_SPACING
+
+    def test_first_row_stays_at_the_top(self, app, page):
+        """窗口拉高时内容必须贴着顶部, 不能被垂直居中或整体下移"""
+        ys = []
+        for h in (500, 900, 1400, 1800):
+            _settle(app, page, 900, 0.35, height=h)
+            ys.append((h, page._cards[0].y()))
+        first = ys[0][1]
+        assert all(y == first for _, y in ys), f"首行 y 随窗口高度变了: {ys}"
+
+    def test_grid_host_is_not_stretched_to_the_viewport(self, app, page):
+        """
+        宿主高度应该等于内容实际需要的高度, 而不是被撑到视口高。
+        被撑高正是行间距拉伸的直接原因。
+        """
+        _settle(app, page, 900, 0.35, height=1600)
+        rows = -(-len(page._cards) // page._cols)          # 向上取整
+        need = rows * MediaCard.CARD_H + (rows - 1) * LibraryPage.GRID_SPACING
+        assert page._grid_host.height() <= need + 2, (
+            f"宿主被撑到 {page._grid_host.height()}px, 内容只需要 {need}px "
+            f"({rows} 行) —— 多出来的高度会被平摊进行间距")
+
+    def test_row_gap_survives_a_refresh(self, app, page):
+        _settle(app, page, 900, 0.35, height=1600)
+        page.refresh()
+        _settle(app, page, None, 0.3)
+        assert _row_gap(page) == LibraryPage.GRID_SPACING
 
 
 # ==========================================================================
