@@ -20,6 +20,21 @@ QMainWindow, QWidget#pageContent {
     font-family: "Segoe UI", "Helvetica Neue", sans-serif;
     font-size: 13px;
 }
+QFrame#titleBar {
+    background-color: #121212;
+    border-bottom: 1px solid #1a1a1a;
+    min-height: 38px; max-height: 38px;
+}
+QLabel#titleLabel {
+    font-size: 11px; font-weight: 300;
+    color: #6b6b6b; padding: 0;
+}
+QPushButton#trafficLight {
+    border: none; border-radius: 5px;
+    min-width: 10px; max-width: 10px;
+    min-height: 10px; max-height: 10px;
+    padding: 0; margin: 0 3px;
+}
 QFrame#headerBar {
     background-color: #121212;
     border: none;
@@ -138,6 +153,21 @@ QMainWindow, QWidget#pageContent {
     color: #1a1a1a;
     font-family: "Segoe UI", "Helvetica Neue", sans-serif;
     font-size: 13px;
+}
+QFrame#titleBar {
+    background-color: #f5f2ed;
+    border-bottom: 1px solid #d4d0c8;
+    min-height: 38px; max-height: 38px;
+}
+QLabel#titleLabel {
+    font-size: 11px; font-weight: 300;
+    color: #8a8a8a; padding: 0;
+}
+QPushButton#trafficLight {
+    border: none; border-radius: 5px;
+    min-width: 10px; max-width: 10px;
+    min-height: 10px; max-height: 10px;
+    padding: 0; margin: 0 3px;
 }
 QFrame#headerBar {
     background-color: #f5f2ed; border: none;

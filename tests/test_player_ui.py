@@ -20,6 +20,8 @@ from PySide6.QtWidgets import QApplication
 from app.services.player import (
     PlayerService, _MpvEngine, _VividPlayerEngine, _vividplayer_url,
 )
+from app.ui.pages import settings_page
+from app.ui.pages.settings_page import SettingsPage
 from app.ui.widgets.player_bar import PlayerBar, fmt_time
 
 _app = QApplication.instance() or QApplication(sys.argv)
@@ -150,3 +152,97 @@ class TestPlayerBar:
         child.update_position(120, 8000)
         assert child._time.text() == "02:00 / 2:13:20", \
             "isVisible() 守卫会导致进度被丢弃"
+
+
+class TestEngineSwitchRealSeam:
+    """
+    回归锁: 切换引擎必须复刻 SettingsPage._on_engine_changed 的真实调用顺序。
+
+    设置页是「先写 config['player']['engine'], 再调 set_engine(同一个值)」,
+    而 PlayerService 与 SettingsPage 共享同一个 config dict (MainWindow 把
+    self.config 同时传给了两边)。engine_type 一旦从 config 读,
+    set_engine 里"没变化就不重建"的守卫就永远命中 → 引擎从不重建,
+    而设置页状态栏还报告"已切换, 立即生效"。
+    实测 mpv↔vividplayer 双向 100% 复现 (2026-09-09 用户手点报"切换播放器失效")。
+
+    ⚠️ 直接调 set_engine() 的测试是**假绿**: 它绕过了"config 先被改写"这个前提。
+    tools/smoke_ui.py 早期版本就是这样假绿过一轮的。
+    """
+
+    @staticmethod
+    def _cfg(engine):
+        return {
+            "player": {"engine": engine, "progress_interval": 10,
+                       "hw_decode": "auto"},
+            "libraries": [],
+            "system": {"theme": "light", "db_path": "./data/cinema.db"},
+            "ffmpeg": {"ffprobe_path": "auto"},
+            "ui": {"version": "echo"},
+        }
+
+    @pytest.mark.parametrize("start,target", [
+        ("mpv", "vividplayer"), ("vividplayer", "mpv"),
+    ])
+    def test_pre_mutated_config_still_rebuilds(self, start, target):
+        """设置页的真实顺序: config 先被改成目标值, 引擎仍必须重建"""
+        cfg = self._cfg(start)
+        svc = PlayerService(cfg, mpv_path=None)
+        assert svc.engine_type == start
+
+        cfg.setdefault("player", {})["engine"] = target   # settings_page.py:173
+        assert svc.set_engine(target) is True             # settings_page.py:184
+
+        expected = _VividPlayerEngine if target == "vividplayer" else _MpvEngine
+        assert isinstance(svc._engine, expected), \
+            f"config 被提前改写时引擎仍须重建, 实际是 {type(svc._engine).__name__}"
+        assert svc.engine_type == target
+
+    def test_engine_type_does_not_follow_config(self):
+        """engine_type 必须反映实际构建出的引擎, 而不是配置文件里的值"""
+        cfg = self._cfg("mpv")
+        svc = PlayerService(cfg, mpv_path=None)
+        cfg["player"]["engine"] = "vividplayer"      # 只改配置, 不切换
+        assert svc.engine_type == "mpv", \
+            "engine_type 跟着 config 走会让 set_engine 的守卫永远命中"
+
+    @pytest.mark.parametrize("start,target,idx", [
+        ("mpv", "vividplayer", 1), ("vividplayer", "mpv", 0),
+    ])
+    def test_settings_page_combo_actually_switches(self, start, target, idx,
+                                                   monkeypatch):
+        """走真实 seam: SettingsPage 的下拉框 (并且不写真实 config.json)"""
+        monkeypatch.setattr(settings_page, "save_config", lambda c: None)
+
+        cfg = self._cfg(start)
+        svc = PlayerService(cfg, mpv_path=None)
+        page = SettingsPage(config=cfg, ffprobe_path=None, mpv_path=None,
+                            player_service=svc)
+        page.setAttribute(Qt.WA_DontShowOnScreen, True)
+
+        page._engine_combo.setCurrentIndex(idx)
+        _app.processEvents()
+
+        expected = _VividPlayerEngine if target == "vividplayer" else _MpvEngine
+        assert isinstance(svc._engine, expected), \
+            f"下拉框切到 {target} 后引擎未重建, 实际 {type(svc._engine).__name__}"
+        assert cfg["player"]["engine"] == target, "配置也应同步"
+        assert "已切换" in page._scan_status.text(), \
+            f"状态栏未给出反馈: {page._scan_status.text()!r}"
+        page.deleteLater()
+
+    def test_old_engine_is_not_accumulated(self):
+        """反复切换不应把旧引擎堆积成 PlayerService 的子对象"""
+        cfg = self._cfg("mpv")
+        svc = PlayerService(cfg, mpv_path=None)
+        before = len(svc.children())
+
+        for _ in range(6):
+            cfg["player"]["engine"] = "vividplayer"
+            svc.set_engine("vividplayer")
+            cfg["player"]["engine"] = "mpv"
+            svc.set_engine("mpv")
+        for _ in range(4):
+            _app.processEvents()          # 让 deleteLater 真正执行
+
+        assert len(svc.children()) <= before + 1, \
+            f"旧引擎在累积: {before} -> {len(svc.children())}"

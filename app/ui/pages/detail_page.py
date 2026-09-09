@@ -12,7 +12,7 @@
 from typing import Optional
 
 from PySide6.QtWidgets import (
-    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QPushButton,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QPushButton, QScrollArea,
 )
 from PySide6.QtCore import Qt
 
@@ -46,11 +46,33 @@ class DetailPage(QWidget):
                  stats_service: Optional[StatsService] = None,
                  parent=None):
         super().__init__(parent)
-        self.setObjectName("pageContent")
         self.media_id = media_id
         self.stats = stats_service
 
-        layout = QVBoxLayout(self)
+        # 整页必须放进滚动区。
+        # 本页的 minimumSizeHint 实测是 1002x996 (200x280 海报 + 信息区 + 10 集列表),
+        # 而窗口小一点就只有 ~800x520。没有滚动区时 Qt 只能硬压 ——
+        # 实测小窗下 10 个选集行按钮**全部塌成高度 0** (y=358..358, 49x0),
+        # 主播放按钮被压成 97x11; 全屏 (2409x1352) 则一切正常。
+        # 用户报的"动漫详情页没有选集""播放键不对""全屏正常小窗口有问题"
+        # 三条其实是同一个根因。
+        #
+        # 形状照抄 SettingsPage (已验证可用): outer 零边距 → QScrollArea → container。
+        # 红线 (HANDOFF §4.7): 不要给 container 的布局设 setAlignment(),
+        # 也不要加 setRowStretch(); 顶部对齐用末尾的 addStretch() 实现。
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+
+        container = QWidget()
+        container.setObjectName("pageContent")
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(32, 24, 32, 24)
         layout.setSpacing(16)
 
@@ -69,9 +91,9 @@ class DetailPage(QWidget):
         layout.addWidget(self._info_frame)
 
         # 文件 / 剧集列表
-        files_title = QLabel("视频文件")
-        files_title.setObjectName("pageSubtitle")
-        layout.addWidget(files_title)
+        self._files_title = QLabel("视频文件")
+        self._files_title.setObjectName("pageSubtitle")
+        layout.addWidget(self._files_title)
 
         self._files_container = QFrame()
         self._files_container.setObjectName("settingGroup")
@@ -80,6 +102,9 @@ class DetailPage(QWidget):
         layout.addWidget(self._files_container)
 
         layout.addStretch()
+
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
 
         if media_id:
             self._load(media_id)
@@ -217,6 +242,13 @@ class DetailPage(QWidget):
 
         self._info_layout.addLayout(meta, stretch=1)
 
+        # 动漫叫"选集", 电影叫"视频文件" —— 用户报"没有选集"时,
+        # 一部分原因就是这个标题在动漫页上也写着"视频文件", 认不出来。
+        if media["media_type"] == "anime":
+            self._files_title.setText(f"选集 · 共 {len(files)} 集")
+        else:
+            self._files_title.setText(f"视频文件 · 共 {len(files)} 个")
+
         self._show_files(media, files)
 
     # ------------------------------------------------------------------
@@ -256,6 +288,11 @@ class DetailPage(QWidget):
             prefix = f"第{f['episode_number']}集 · " if f.get("episode_number") else ""
             name = QLabel(prefix + (f["file_name"] or ""))
             name.setObjectName("fileTitle")
+            # QLabel 的 minimumSizeHint 等于整行文字的宽度。不设显式最小宽度的话,
+            # 一个长文件名就能把整页最小宽度顶到 1000px 以上 —— 横向滚动条是关掉的,
+            # 所以必须让它能缩, 完整名字挪到 tooltip。
+            name.setMinimumWidth(60)
+            name.setToolTip(f["file_name"] or "")
             row.addWidget(name, stretch=1)
 
             tech = " / ".join(
@@ -269,6 +306,8 @@ class DetailPage(QWidget):
             )
             info = QLabel(tech)
             info.setObjectName("fileMeta")
+            info.setMinimumWidth(40)          # 同上: 技术参数串也不能顶住最小宽度
+            info.setToolTip(tech)
             row.addWidget(info)
 
             container = QWidget()

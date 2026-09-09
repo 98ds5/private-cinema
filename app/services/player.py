@@ -691,21 +691,32 @@ class PlayerService(QObject):
         super().__init__(parent)
         self.config = config
         self.mpv_path = mpv_path          # 重建引擎时要复用, 必须存下来
-        self._build_engine(self.engine_type)
+        self._engine_type: Optional[str] = None    # 必须先存在, _build_engine 会写它
+        self._build_engine((config.get("player") or {}).get("engine", "mpv"))
 
     def _build_engine(self, engine_type: str):
         """构建引擎并转发其信号 (构造与运行时切换共用同一套逻辑)"""
+        old = getattr(self, "_engine", None)
+
         if engine_type == "vividplayer":
             self._engine = _VividPlayerEngine(self.config, self)
+            self._engine_type = "vividplayer"
         else:
             if engine_type != "mpv":
                 self.playback_error.emit(f"未知的播放引擎: {engine_type}, 回退 MPV")
             self._engine = _MpvEngine(self.config, self.mpv_path, self)
+            self._engine_type = "mpv"
 
         self._engine.playback_started.connect(self.playback_started)
         self._engine.playback_position.connect(self.playback_position)
         self._engine.playback_finished.connect(self.playback_finished)
         self._engine.playback_error.connect(self.playback_error)
+
+        # 旧引擎是 self 的子对象, 不摘父子关系就会一直累积: 每切换一次多一个,
+        # 而且它残留的信号连接仍然有效。(同 HANDOFF §4.8 的 deleteLater 坑)
+        if old is not None and old is not self._engine:
+            old.setParent(None)
+            old.deleteLater()
 
     def set_engine(self, engine_type: str) -> bool:
         """
@@ -736,7 +747,17 @@ class PlayerService(QObject):
 
     @property
     def engine_type(self) -> str:
-        return self.config.get("player", {}).get("engine", "mpv")
+        """
+        当前**实际构建出来**的引擎类型。
+
+        绝不能改成读 config: SettingsPage._on_engine_changed 的真实顺序是
+        「先把 config['player']['engine'] 改成目标值, 再调 set_engine(目标值)」,
+        而 PlayerService 与 SettingsPage 共享同一个 config dict (MainWindow 把
+        self.config 同时传给了两边)。读 config 的话, set_engine 里那句
+        "没变化就不重建" 的守卫会永远命中 → 引擎从不重建, 而设置页的状态栏
+        还报告 "已切换, 立即生效"。实测 mpv↔vividplayer 双向 100% 复现。
+        """
+        return self._engine_type
 
     def play(self, file_path: str, media_id: int,
              episode_id: int = None, start_pos: int = 0):
