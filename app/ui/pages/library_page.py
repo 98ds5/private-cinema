@@ -81,7 +81,11 @@ class LibraryPage(QWidget):
         layout.addWidget(self._scroll, stretch=1)
 
         # 延迟加载（等窗口显示后再查数据）
-        QTimer.singleShot(100, self.refresh)
+        # ⚠️ 必须传 self 作为 context 对象: 不带 context 的 singleShot 在页面销毁后
+        # 照样会触发, 打进已销毁的 C++ 对象 → 刷一屏
+        # "RuntimeError: libshiboken: Internal C++ object already deleted"。
+        # 带上 self, 页面一销毁这个定时器就自动取消。
+        QTimer.singleShot(100, self, self.refresh)
 
     def refresh(self):
         if not self.stats:
@@ -108,12 +112,17 @@ class LibraryPage(QWidget):
             self._subtitle.setText(f"加载失败: {type(e).__name__}: {e}")
 
     def _render_cards(self, items: list):
-        # 清空旧卡片。
-        # 必须先 setParent(None) 再 deleteLater(): deleteLater 要等下一轮事件
-        # 循环才真正销毁, 期间旧卡片仍挂在容器子树里。搜索框每敲一个字符就会
-        # refresh 一次, 不清父子关系会让卡片成倍堆积 (实测 15 部查出 30 张)。
+        # 清空旧卡片: removeWidget → hide → setParent(None) → deleteLater, 四步各有用途:
+        #   - setParent(None): deleteLater 要等下一轮事件循环才真销毁, 期间旧卡片仍挂在
+        #     容器子树里, 搜索框每敲一个字符 refresh 一次就会成倍堆积 (实测 15 部查出 30 张)。
+        #   - hide(): removeWidget 只是把它从布局里摘出来, 控件仍是子级,
+        #     在真正销毁前会继续画在老位置上 → 留残影。
+        # 注: 曾怀疑 setParent(None) 会让旧卡片闪成一串顶层小窗, **实测证伪** ——
+        #     Qt6 在 setParent(None) 时自己就把控件藏了 (isHidden() 恒 True, isVisible() 恒 False)。
+        #     真正闪窗的是 media_card.py 里那个还没拿到父级就被 setVisible(True) 的角标 QLabel。
         for card in self._cards:
             self._grid.removeWidget(card)
+            card.hide()
             card.setParent(None)
             card.deleteLater()
         self._cards.clear()

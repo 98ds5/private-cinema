@@ -223,6 +223,10 @@ class HomePage(QWidget):
             item = self._recent_layout.takeAt(0)
             w = item.widget()
             if w is not None and w is not self._recent_placeholder:
+                # takeAt 只是把它从布局里摘出来, 控件仍是 _recent_container 的子级,
+                # 在 deleteLater 真正生效前会继续画在老位置上 → 先 hide() 掉。
+                # 不做 setParent(None): 这里没必要 (没有卡片那种成倍堆积问题)。
+                w.hide()
                 w.deleteLater()
 
         if not items:

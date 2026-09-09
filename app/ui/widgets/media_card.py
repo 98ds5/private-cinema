@@ -44,8 +44,17 @@ class MediaCard(QFrame):
         self._badges.setFixedHeight(18)
         self._badges.setAlignment(Qt.AlignCenter)
         self._badges.setToolTip(" · ".join(badges) if badges else "无画质元数据")
-        # 没数据就整行藏掉, 别留一条空白占位
-        self._badges.setVisible(bool(badges))
+        # 没数据就整行藏掉, 别留一条空白占位。
+        # ⚠️ 这里只能用 hide(), **绝不能写 setVisible(bool(badges))**:
+        # setVisible(True) 作用在一个还没有父级的 widget 上, 会把它变成
+        # **顶层窗口并立刻显示**, 而下一行 addWidget 才把它塞回卡片 → 每张卡片
+        # 构造时都会在自己位置上闪出一个 15~94 x 18 的无字小窗再消失
+        # (脱离 MainWindow 子树, QSS 不生效, 所以看着是空白的)。
+        # 15 张卡 × 每次 refresh(切页 / 搜索防抖到期) = 用户看到的
+        # "一串小窗口闪过去, 会自己关"。只有 LibraryPage 建卡片, 所以首页和设置不闪。
+        # 有角标时什么都不用做: 加进布局后自然会跟着卡片显示。
+        if not badges:
+            self._badges.hide()
         layout.addWidget(self._badges)
 
         # 标题
