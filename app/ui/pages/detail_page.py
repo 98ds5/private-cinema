@@ -19,26 +19,7 @@ from PySide6.QtCore import Qt
 from app.database import get_session
 from app.models.tables import Media, MediaFile, Episode
 from app.services.stats import StatsService
-
-
-def _fmt_dur(seconds: int) -> str:
-    """秒 → 可读时长"""
-    seconds = int(seconds or 0)
-    if seconds <= 0:
-        return "—"
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
-def _fmt_size(num_bytes: int) -> str:
-    """字节 → 可读体积"""
-    size = float(num_bytes or 0)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
-        size /= 1024
-    return f"{size:.1f} TB"
+from app.utils.quality import format_tech_line, tech_tooltip
 
 
 class DetailPage(QWidget):
@@ -158,6 +139,12 @@ class DetailPage(QWidget):
                     "height": f.height,
                     "video_codec": f.video_codec,
                     "hdr_type": f.hdr_type,
+                    # 这几项原先没往 UI 传, 于是帧率/音轨/字幕轨在详情页全丢了
+                    "frame_rate": f.frame_rate,
+                    "audio_codec": f.audio_codec,
+                    "audio_tracks": f.audio_tracks,
+                    "subtitle_tracks": f.subtitle_tracks,
+                    "container_format": f.container_format,
                 }
                 for f, ep_num in rows
             ]
@@ -288,27 +275,31 @@ class DetailPage(QWidget):
             prefix = f"第{f['episode_number']}集 · " if f.get("episode_number") else ""
             name = QLabel(prefix + (f["file_name"] or ""))
             name.setObjectName("fileTitle")
-            # QLabel 的 minimumSizeHint 等于整行文字的宽度。不设显式最小宽度的话,
-            # 一个长文件名就能把整页最小宽度顶到 1000px 以上 —— 横向滚动条是关掉的,
-            # 所以必须让它能缩, 完整名字挪到 tooltip。
-            name.setMinimumWidth(60)
-            name.setToolTip(f["file_name"] or "")
-            row.addWidget(name, stretch=1)
 
-            tech = " / ".join(
-                x for x in (
-                    f"{f['width']}x{f['height']}" if f.get("width") else "",
-                    f.get("video_codec") or "",
-                    f.get("hdr_type") if f.get("hdr_type") not in (None, "", "SDR") else "",
-                    _fmt_dur(f.get("duration")),
-                    _fmt_size(f.get("file_size")),
-                ) if x
-            )
-            info = QLabel(tech)
-            info.setObjectName("fileMeta")
-            info.setMinimumWidth(40)          # 同上: 技术参数串也不能顶住最小宽度
-            info.setToolTip(tech)
-            row.addWidget(info)
+            # 技术信息单独一行放在文件名下面。
+            # 原先它和文件名挤在同一行, 而且只渲染 宽x高/编码/HDR/时长/体积,
+            # 其中 hdr_type == "SDR" 被**刻意隐藏**, 帧率/音轨/字幕轨一条都没显示
+            # → 用户报"视频画质信息不够明确, 比如 hdr 什么的"。
+            # 数据其实 25/25 全在库里, 纯粹是没往上传。
+            tech = QLabel(format_tech_line(f))
+            tech.setObjectName("fileMeta")
+
+            texts = QVBoxLayout()
+            texts.setSpacing(2)
+            texts.addWidget(name)
+            texts.addWidget(tech)
+            text_box = QWidget()
+            text_box.setLayout(texts)
+
+            # QLabel 的 minimumSizeHint 等于整行文字的宽度。不设显式最小宽度的话,
+            # 一个长文件名或一长串技术参数就能把整页最小宽度顶到 1000px 以上,
+            # 而横向滚动条是关掉的 → 右侧被裁掉。完整内容都在 tooltip 里。
+            name.setMinimumWidth(60)
+            tech.setMinimumWidth(60)
+            tip = tech_tooltip(f)
+            name.setToolTip(tip)
+            tech.setToolTip(tip)
+            row.addWidget(text_box, stretch=1)
 
             container = QWidget()
             container.setLayout(row)

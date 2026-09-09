@@ -633,6 +633,10 @@ QLabel#metaKey {{ font-size: 12px; color: {muted}; }}
 QLabel#metaValue {{ font-size: 12px; color: {accent}; font-weight: 600; }}
 QLabel#fileTitle {{ font-size: 11px; }}
 QLabel#fileMeta {{ font-size: 10px; color: {muted}; }}
+QLabel#cardBadges {{
+    color: {accent}; font-size: 10px; font-weight: 700;
+    padding: 2px 0; background: transparent;
+}}
 
 QWidget#nowPlayingBar {{
     background-color: {surface};

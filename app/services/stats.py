@@ -12,6 +12,7 @@ from sqlalchemy import func
 
 from app.database import get_session
 from app.models.tables import Media, MediaFile
+from app.utils.quality import best_hdr, has_chinese_subtitle
 
 
 class StatsService:
@@ -131,10 +132,11 @@ class StatsService:
             total = q.count()
             items = q.offset(offset).limit(limit).all()
 
-            # 文件数用一次分组查询取回, 而不是逐个 m.files 懒加载:
+            # 文件数与画质信息各用一次分组查询取回, 而不是逐个 m.files 懒加载:
             #   1. 避免 N+1 查询 (每部作品一次 SQL)
             #   2. 懒加载在会话关闭后必然 DetachedInstanceError
             ids = [m.id for m in items]
+            counts, tech = {}, {}
             if ids:
                 counts = dict(
                     s.query(MediaFile.media_id, func.count(MediaFile.id))
@@ -142,22 +144,48 @@ class StatsService:
                     .group_by(MediaFile.media_id)
                     .all()
                 )
+                # 卡片上要显示 4K/HDR/中字 角标, 所以这里把这一页所有文件的技术
+                # 元数据一次拉回来在 Python 里聚合 (100 部 × 几个文件, 量很小)。
+                rows = s.query(
+                    MediaFile.media_id, MediaFile.width, MediaFile.height,
+                    MediaFile.hdr_type, MediaFile.video_codec,
+                    MediaFile.subtitle_tracks,
+                ).filter(MediaFile.media_id.in_(ids)).all()
+                for mid, width, height, hdr, vcodec, subs in rows:
+                    t = tech.setdefault(mid, {"widths": [], "heights": [],
+                                              "hdrs": [], "vcodecs": [],
+                                              "chi_sub": False})
+                    if width:
+                        t["widths"].append(width)
+                    if height:
+                        t["heights"].append(height)
+                    if hdr:
+                        t["hdrs"].append(hdr)
+                    if vcodec:
+                        t["vcodecs"].append(vcodec)
+                    if has_chinese_subtitle(subs):
+                        t["chi_sub"] = True
             else:
                 counts = {}
 
-            return {
-                "total": total,
-                "items": [
-                    {
-                        "id": m.id,
-                        "title": m.title,
-                        "media_type": m.media_type,
-                        "year": m.year,
-                        "status": m.status,
-                        "rating": m.rating,
-                        "poster": m.poster_path,
-                        "file_count": counts.get(m.id, 0),
-                    }
-                    for m in items
-                ],
-            }
+            result_items = []
+            for m in items:
+                t = tech.get(m.id, {})
+                result_items.append({
+                    "id": m.id,
+                    "title": m.title,
+                    "media_type": m.media_type,
+                    "year": m.year,
+                    "status": m.status,
+                    "rating": m.rating,
+                    "poster": m.poster_path,
+                    "file_count": counts.get(m.id, 0),
+                    # 画质聚合: 一部作品多个文件时取最高的那个
+                    "best_width": max(t.get("widths") or [0]),
+                    "best_height": max(t.get("heights") or [0]),
+                    "best_hdr": best_hdr(t.get("hdrs")),
+                    "video_codec": (t.get("vcodecs") or [None])[0],
+                    "has_chi_sub": t.get("chi_sub", False),
+                })
+
+            return {"total": total, "items": result_items}
