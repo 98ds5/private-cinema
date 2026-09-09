@@ -149,12 +149,31 @@ class TestExtractStream:
         out = tmp_path / "posters" / "1.jpg"
 
         def _r(cmd, timeout):
-            _make_jpg(out)                              # 假装 ffmpeg 写出了文件
+            _make_jpg(P._tmp_out(out))    # ffmpeg 写的是临时名, 之后才原子改名
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         monkeypatch.setattr(P, "_run", _r)
         assert P.extract_stream("ffmpeg", str(video), 1, out) is True
         assert out.is_file() and out.stat().st_size > 0
+        assert not P._tmp_out(out).exists(), "临时文件该被清掉"
+
+    def test_normalises_size_and_quality(self, video, tmp_path, monkeypatch):
+        """存图要压到长边<=448 且保持比例 —— 横版剧照硬裁成竖版会切掉大半画面"""
+        seen = []
+        out = tmp_path / "posters" / "n.jpg"
+
+        def _r(cmd, timeout):
+            seen.append(cmd)
+            _make_jpg(P._tmp_out(out))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(P, "_run", _r)
+        P.extract_stream("ffmpeg", str(video), 1, out)
+        joined = " ".join(seen[0])
+        assert "-q:v" in joined and P._QV in seen[0]
+        assert "force_original_aspect_ratio=decrease" in joined
+        assert "320:448" not in joined and "crop" not in joined, \
+            "不该强制竖版裁切"
 
     def test_zero_exit_but_no_file_counts_as_failure(self, video, tmp_path, monkeypatch):
         """ffmpeg 有时返回 0 却什么都没写, 所以要以文件为准"""
@@ -166,12 +185,14 @@ class TestExtractStream:
         out = tmp_path / "posters" / "3.jpg"
 
         def _r(cmd, timeout):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(b"")
+            tmp = P._tmp_out(out)
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes(b"")
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         monkeypatch.setattr(P, "_run", _r)
         assert P.extract_stream("ffmpeg", str(video), 1, out) is False
+        assert not out.exists(), "半截的图不能留在最终位置, 否则下次会被当成有效缓存"
 
     def test_nonzero_exit(self, video, tmp_path, monkeypatch):
         out = tmp_path / "posters" / "4.jpg"
@@ -187,7 +208,7 @@ class TestExtractStream:
 
         def _r(cmd, timeout):
             seen.append(cmd)
-            _make_jpg(out)
+            _make_jpg(P._tmp_out(out))
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         monkeypatch.setattr(P, "_run", _r)
@@ -255,15 +276,24 @@ class TestEnsurePoster:
         monkeypatch.setattr(P, "find_manual_poster", lambda *a, **k: None)
         assert P.ensure_poster(1, [str(video)], "ffprobe", "ffmpeg") == (None, None)
 
-    def test_embedded_beats_manual(self, posters_dir, video, monkeypatch):
+    def test_embedded_beats_frame_but_loses_to_manual(self, posters_dir, video, monkeypatch):
+        """手动图 > 内嵌封面 > 截帧: 用户自己丢的图是最强的意图信号"""
         _make_jpg(video.parent / "poster.jpg")
         monkeypatch.setattr(P, "find_attached_pic", lambda *a, **k: 1)
 
         def fake_extract(ff, vp, idx, out):
-            _make_jpg(out)
+            _make_jpg(P._tmp_out(out))                  # ffmpeg 写的是临时名
             return True
 
         monkeypatch.setattr(P, "extract_stream", fake_extract)
+        path, source = P.ensure_poster(2, [str(video)], "ffprobe", "ffmpeg")
+        assert source == "manual", f"同目录有 poster.jpg 就不该再用内嵌封面, 实得 {source}"
+        assert path == str(posters_dir / "2.jpg")
+
+    def test_embedded_used_when_no_manual_image(self, posters_dir, video, monkeypatch):
+        monkeypatch.setattr(P, "find_attached_pic", lambda *a, **k: 1)
+        monkeypatch.setattr(P, "extract_stream",
+                            lambda ff, vp, idx, out: bool(_make_jpg(P._tmp_out(out))))
         path, source = P.ensure_poster(2, [str(video)], "ffprobe", "ffmpeg")
         assert source == "embedded" and path == str(posters_dir / "2.jpg")
 
@@ -274,12 +304,13 @@ class TestEnsurePoster:
         assert source == "manual" and path == str(posters_dir / "3.jpg")
         assert (posters_dir / "3.jpg").read_bytes() == manual.read_bytes(), "应该把图片复制过来"
 
-    def test_falls_back_to_manual_when_extraction_fails(self, posters_dir, video, monkeypatch):
-        _make_jpg(video.parent / "poster.jpg")
-        monkeypatch.setattr(P, "find_attached_pic", lambda *a, **k: 1)
-        monkeypatch.setattr(P, "extract_stream", lambda *a, **k: False)
-        path, source = P.ensure_poster(4, [str(video)], "ffprobe", "ffmpeg")
-        assert source == "manual", "内嵌抽失败要退回同目录图片, 不能直接放弃"
+    def test_manual_copy_leaves_no_empty_file_on_failure(self, posters_dir, video, monkeypatch):
+        """复制失败不能留下 0 字节的 jpg, 否则下次会被当成有效缓存"""
+        monkeypatch.setattr(P, "find_manual_poster",
+                            lambda vp: posters_dir / "不存在的图.jpg")
+        monkeypatch.setattr(P, "find_attached_pic", lambda *a, **k: None)
+        assert P.ensure_poster(4, [str(video)], None, None) == (None, None)
+        assert not (posters_dir / "4.jpg").exists()
 
     def test_none_when_nothing_available(self, posters_dir, video, monkeypatch):
         monkeypatch.setattr(P, "find_attached_pic", lambda *a, **k: None)
@@ -322,7 +353,8 @@ def db(tmp_path):
             s.flush()
             for j in range(nfiles):
                 s.add(MediaFile(media_id=i, file_path=f"/fake/{i}_{j}.mkv",
-                                file_name=f"{i}_{j}.mkv", parse_status="success"))
+                                file_name=f"{i}_{j}.mkv", duration=1000,
+                                parse_status="success"))
         s.commit()
     return tmp_path
 
@@ -526,3 +558,254 @@ class TestDetectFfmpeg:
         monkeypatch.setattr(PD, "_detect", lambda tool, custom=None: None)
         monkeypatch.setattr(PD, "detect_ffprobe", lambda *_a, **_k: None)
         assert PD.detect_ffmpeg() is None
+
+
+# ==========================================================================
+# 自动截帧兜底 —— 真库 15 部里只有 2 部有内嵌封面, 靠这个把覆盖率补上去
+# ==========================================================================
+def _make_solid(path, color, fmt="PNG", w=64, h=64):
+    """造一张纯色图。亮度测试用 PNG: JPEG 有损, 阈值卡不准"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pm = QPixmap(w, h)
+    pm.fill(QColor(color) if not isinstance(color, QColor) else color)
+    assert pm.save(str(path), fmt), f"存不出测试图: {path}"
+    return path
+
+
+class TestBrightness:
+    def test_black_is_dark(self, tmp_path):
+        p = _make_solid(tmp_path / "black.png", "black")
+        assert P.average_brightness(p) < 5
+        assert P.is_dark_image(p) is True
+
+    def test_white_is_not_dark(self, tmp_path):
+        p = _make_solid(tmp_path / "white.png", "white")
+        assert P.average_brightness(p) > 250
+        assert P.is_dark_image(p) is False
+
+    def test_threshold_is_honoured(self, tmp_path):
+        """亮度 20 该判黑、30 不该 —— 阈值 25 必须真的被用上"""
+        dark = _make_solid(tmp_path / "d.png", QColor(20, 20, 20))
+        ok = _make_solid(tmp_path / "o.png", QColor(30, 30, 30))
+        assert P.is_dark_image(dark, threshold=25) is True
+        assert P.is_dark_image(ok, threshold=25) is False
+
+    def test_missing_file_counts_as_dark(self, tmp_path):
+        """读不出来就算不合格: 截帧"成功"但图坏了同样不能当封面"""
+        assert P.average_brightness(tmp_path / "nope.png") is None
+        assert P.is_dark_image(tmp_path / "nope.png") is True
+
+    def test_corrupt_file_counts_as_dark(self, tmp_path):
+        bad = tmp_path / "bad.png"
+        bad.write_bytes(b"not an image at all")
+        assert P.is_dark_image(bad) is True
+
+    def test_mid_grey_is_not_dark(self, tmp_path):
+        p = _make_solid(tmp_path / "grey.png", QColor(128, 128, 128))
+        assert 118 < P.average_brightness(p) < 138
+        assert P.is_dark_image(p) is False
+
+
+class TestClampTimestamps:
+    def test_typical_movie(self):
+        assert P._clamp_timestamps(1000.0) == (100.0, 300.0, 500.0)
+
+    def test_no_duration_means_no_timestamps(self):
+        assert P._clamp_timestamps(None) == ()
+        assert P._clamp_timestamps(0) == ()
+        assert P._clamp_timestamps(-5) == ()
+
+    def test_never_past_the_end(self):
+        """贴着片尾截会失败, 所以要留安全边距"""
+        for d in (2.0, 5.0, 60.0, 7200.0):
+            got = P._clamp_timestamps(d)
+            assert got, f"时长 {d} 一个时间点都没给"
+            for ts in got:
+                assert 0 <= ts <= d - P._SAFETY_MARGIN + 1e-6, (d, ts)
+
+    def test_very_short_video_stays_inside_the_safe_window(self):
+        """
+        1.5 秒的片子: 三个比例点都还在(0.15/0.45/0.5), 但全被夹进
+        [0, duration - 安全边距] 里, 且严格递增去重。
+        (原先这条断言"应该只剩一个点", 那是我预期写错了 —— 实现本来就没这个约束。)
+        """
+        got = P._clamp_timestamps(1.5)
+        assert got, "再短的片子也该至少给一个时间点"
+        assert all(0 <= ts <= 1.5 - P._SAFETY_MARGIN + 1e-6 for ts in got), got
+        assert got == tuple(sorted(set(got))), got
+
+    def test_strictly_increasing_and_deduped(self):
+        for d in (1.5, 3.0, 10.0, 90.0, 1000.0):
+            got = list(P._clamp_timestamps(d))
+            assert got == sorted(set(got)), f"时长 {d} 的时间点没去重/没递增: {got}"
+
+
+class TestExtractFrame:
+    def _fake_ok(self, monkeypatch, out, seen=None):
+        def _r(cmd, timeout):
+            if seen is not None:
+                seen.append(cmd)
+            _make_jpg(P._tmp_out(out))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        monkeypatch.setattr(P, "_run", _r)
+
+    def test_success_and_tmp_cleaned(self, video, tmp_path, monkeypatch):
+        out = tmp_path / "posters" / "1.jpg"
+        self._fake_ok(monkeypatch, out)
+        assert P.extract_frame("ffmpeg", str(video), 123.4, out) is True
+        assert out.is_file() and out.stat().st_size > 0
+        assert not P._tmp_out(out).exists(), "临时文件该被清掉"
+
+    def test_seek_flag_comes_before_input(self, video, tmp_path, monkeypatch):
+        """-ss 必须在 -i 前面才是快速定位; 放后面要解码整段, 4K 长片差几十倍"""
+        out = tmp_path / "posters" / "2.jpg"
+        seen = []
+        self._fake_ok(monkeypatch, out, seen)
+        P.extract_frame("ffmpeg", str(video), 100.0, out)
+        cmd = seen[0]
+        assert cmd.index("-ss") < cmd.index("-i"), f"-ss 跑到 -i 后面了: {cmd}"
+        assert "100.000" in cmd
+
+    def test_normalises_size_and_quality(self, video, tmp_path, monkeypatch):
+        out = tmp_path / "posters" / "3.jpg"
+        seen = []
+        self._fake_ok(monkeypatch, out, seen)
+        P.extract_frame("ffmpeg", str(video), 10.0, out)
+        joined = " ".join(seen[0])
+        assert "-q:v" in joined and P._QV in seen[0]
+        assert "force_original_aspect_ratio=decrease" in joined
+
+    def test_zero_exit_but_no_file_is_failure(self, video, tmp_path, monkeypatch):
+        out = tmp_path / "posters" / "4.jpg"
+        monkeypatch.setattr(P, "_run", _fake_run(returncode=0))
+        assert P.extract_frame("ffmpeg", str(video), 10.0, out) is False
+
+    def test_missing_ffmpeg(self, video, tmp_path):
+        assert P.extract_frame(None, str(video), 10.0, tmp_path / "x.jpg") is False
+
+    def test_timeout_is_swallowed(self, video, tmp_path, monkeypatch):
+        monkeypatch.setattr(P, "_run", _fake_run(
+            raises=subprocess.TimeoutExpired(cmd="ffmpeg", timeout=60)))
+        assert P.extract_frame("ffmpeg", str(video), 10.0, tmp_path / "x.jpg") is False
+
+    def test_negative_timestamp_is_clamped(self, video, tmp_path, monkeypatch):
+        out = tmp_path / "posters" / "5.jpg"
+        seen = []
+        self._fake_ok(monkeypatch, out, seen)
+        P.extract_frame("ffmpeg", str(video), -50.0, out)
+        assert "0.000" in seen[0]
+
+
+class TestFrameFallback:
+    """ensure_poster 第 ④ 级: 没有手动图也没有内嵌封面时自动截帧"""
+
+    def _nothing_else(self, monkeypatch):
+        monkeypatch.setattr(P, "find_manual_poster", lambda vp: None)
+        monkeypatch.setattr(P, "find_attached_pic", lambda *a, **k: None)
+
+    def test_frame_used_as_last_resort(self, posters_dir, video, monkeypatch):
+        self._nothing_else(monkeypatch)
+        monkeypatch.setattr(P, "extract_frame",
+                            lambda ff, vp, ts, out: bool(_make_jpg(out, 120, 180)))
+        path, source = P.ensure_poster(20, [str(video)], "ffprobe", "ffmpeg",
+                                       durations=[1000.0])
+        assert source == "frame@10%" and path == str(posters_dir / "20.jpg")
+
+    def test_dark_frame_falls_through_to_the_next_ratio(self, posters_dir, video, monkeypatch):
+        """片头 10% 常是黑场或片商 logo, 必须换下一个时间点再试"""
+        self._nothing_else(monkeypatch)
+        tried = []
+
+        def fake(ff, vp, ts, out):
+            tried.append(ts)
+            _make_solid(out, "black" if ts < 200 else QColor(140, 90, 60), fmt="JPG")
+            return True
+
+        monkeypatch.setattr(P, "extract_frame", fake)
+        path, source = P.ensure_poster(21, [str(video)], "ffprobe", "ffmpeg",
+                                       durations=[1000.0])
+        assert source == "frame@30%", f"10% 那张是黑的该退到 30%; 实得 {source}, 试过 {tried}"
+
+    def test_all_dark_returns_none_and_leaves_no_scraps(self, posters_dir, video, monkeypatch):
+        self._nothing_else(monkeypatch)
+        monkeypatch.setattr(P, "extract_frame",
+                            lambda ff, vp, ts, out: bool(_make_solid(out, "black", fmt="JPG")))
+        assert P.ensure_poster(22, [str(video)], "ffprobe", "ffmpeg",
+                               durations=[1000.0]) == (None, None)
+        assert not (posters_dir / "22.jpg").exists(), "全黑就别留下残次品"
+
+    def test_uses_the_db_duration_without_probing(self, posters_dir, video, monkeypatch):
+        """库里已有 MediaFile.duration, 不该再跑一次 ffprobe"""
+        self._nothing_else(monkeypatch)
+        monkeypatch.setattr(P, "get_duration",
+                            lambda *a, **k: pytest.fail("给了 durations 还去 probe"))
+        monkeypatch.setattr(P, "extract_frame",
+                            lambda ff, vp, ts, out: bool(_make_jpg(out)))
+        assert P.ensure_poster(23, [str(video)], "ffprobe", "ffmpeg",
+                               durations=[600.0])[1] == "frame@10%"
+
+    def test_probes_duration_when_the_db_has_none(self, posters_dir, video, monkeypatch):
+        self._nothing_else(monkeypatch)
+        probed = []
+        monkeypatch.setattr(P, "get_duration",
+                            lambda ff, vp: (probed.append(vp), 900.0)[1])
+        monkeypatch.setattr(P, "extract_frame",
+                            lambda ff, vp, ts, out: bool(_make_jpg(out)))
+        assert P.ensure_poster(24, [str(video)], "ffprobe", "ffmpeg",
+                               durations=[None])[1] == "frame@10%"
+        assert probed == [str(video)]
+
+    def test_no_ffmpeg_means_no_frames(self, posters_dir, video, monkeypatch):
+        self._nothing_else(monkeypatch)
+        monkeypatch.setattr(P, "extract_frame",
+                            lambda *a, **k: pytest.fail("没有 ffmpeg 不该截帧"))
+        assert P.ensure_poster(25, [str(video)], "ffprobe", None,
+                               durations=[1000.0]) == (None, None)
+
+    def test_no_duration_means_no_frames(self, posters_dir, video, monkeypatch):
+        """拿不到时长就不能瞎猜时间点"""
+        self._nothing_else(monkeypatch)
+        monkeypatch.setattr(P, "get_duration", lambda *a, **k: None)
+        monkeypatch.setattr(P, "extract_frame",
+                            lambda *a, **k: pytest.fail("没有时长不该截帧"))
+        assert P.ensure_poster(26, [str(video)], "ffprobe", "ffmpeg",
+                               durations=[None]) == (None, None)
+
+    def test_multi_episode_tries_each_file(self, posters_dir, tmp_path, monkeypatch):
+        """动漫一季十几集: 第一集全黑不代表整部都没法用"""
+        self._nothing_else(monkeypatch)
+        a = tmp_path / "E01.mkv"; a.write_bytes(b"x")
+        b = tmp_path / "E02.mkv"; b.write_bytes(b"x")
+        seen = []
+
+        def fake(ff, vp, ts, out):
+            seen.append(vp)
+            if vp.endswith("E01.mkv"):
+                _make_solid(out, "black", fmt="JPG")
+            else:
+                _make_jpg(out, 120, 180)
+            return True
+
+        monkeypatch.setattr(P, "extract_frame", fake)
+        source = P.ensure_poster(27, [str(a), str(b)], "ffprobe", "ffmpeg",
+                                 durations=[1000.0, 1000.0])[1]
+        assert source == "frame@10%"
+        assert str(b) in seen, "第一集不行就该试第二集"
+
+
+class TestWorkerFrameCounting:
+    def test_frame_source_is_counted_under_frame(self, db, posters_dir, monkeypatch):
+        monkeypatch.setattr(P, "find_manual_poster", lambda vp: None)
+        monkeypatch.setattr(P, "find_attached_pic", lambda *a, **k: None)
+        monkeypatch.setattr(P, "extract_frame",
+                            lambda ff, vp, ts, out: bool(_make_jpg(out)))
+        w = P.PosterWorker("ffprobe", "ffmpeg")
+        prog, errs, done = [], [], []
+        w.poster_progress.connect(lambda t, s: prog.append((t, s)))
+        w.poster_finished.connect(lambda c: done.append(c))
+        w.run()
+        c = done[0]
+        assert c["frame"] == 3 and c["embedded"] == 0 and c["none"] == 0, c
+        assert all(s.startswith("frame@") for _, s in prog), prog
+        with get_session() as s:
+            assert s.get(Media, 2).poster_path == str(posters_dir / "2.jpg")

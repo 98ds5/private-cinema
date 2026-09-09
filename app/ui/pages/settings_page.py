@@ -170,10 +170,12 @@ class SettingsPage(QWidget):
         self._poster_btn = QPushButton("提取内嵌封面")
         self._poster_btn.setObjectName("themeToggle")
         self._poster_btn.setToolTip(
-            "从视频文件里抽出内嵌封面 (mkv/mp4 的 attached_pic 流), 存到 data/posters/。\n"
-            "没有内嵌封面时, 改用视频同目录下的 poster / cover / folder.jpg。\n"
-            "两者都没有就继续用首字母占位。全程不联网。\n"
-            "提取完切一下页面, 卡片上就会出现海报。"
+            "给每部作品配一张封面, 存到 data/posters/, 全程不联网。优先级:\n"
+            "① 视频同目录你自己放的 poster / cover / folder.jpg\n"
+            "② 视频文件里内嵌的封面 (mkv/mp4 的 attached_pic 流)\n"
+            "③ 自动截帧: 片长 10% → 30% → 50% 各截一张, 黑屏的自动跳过\n"
+            "④ 都没有就继续用首字母占位\n"
+            "提取完切一下页面, 卡片上就会出现封面。"
         )
         self._poster_btn.clicked.connect(self._start_posters)
         layout.addWidget(self._poster_btn)
@@ -376,14 +378,19 @@ class SettingsPage(QWidget):
     def _on_poster_progress(self, title, source):
         zh = {"cached": "已有", "embedded": "内嵌封面", "manual": "同目录图片",
               "none": "没有封面", "failed": "失败"}
-        self._poster_status.setText(f"海报: {title} → {zh.get(source, source)}")
+        if str(source).startswith("frame"):
+            label = f"自动截帧 {source.split('@')[-1]}处"
+        else:
+            label = zh.get(source, source)
+        self._poster_status.setText(f"海报: {title} → {label}")
 
     def _on_poster_error(self, msg):
         self._poster_status.setText(f"海报错误: {msg}")
 
     def _on_poster_finished(self, counts):
         self._poster_status.setText(
-            f"海报完成: 内嵌 {counts.get('embedded',0)}  |  "
+            f"海报完成: 截帧 {counts.get('frame',0)}  |  "
+            f"内嵌 {counts.get('embedded',0)}  |  "
             f"同目录 {counts.get('manual',0)}  |  "
             f"已有 {counts.get('cached',0)}  |  "
             f"没有 {counts.get('none',0)}  |  "
