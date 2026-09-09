@@ -14,6 +14,8 @@ from app.services.player import PlayerService
 from app.services.scanner import ScanWorker
 from app.storage.local import LocalStorage
 from app.services.parser import ParseWorker
+from app.services.posters import PosterWorker
+from app.utils.path_detector import detect_ffmpeg
 from app.ui.styles import save_config
 
 
@@ -30,6 +32,7 @@ class SettingsPage(QWidget):
 
         self._scan_worker = None
         self._parse_worker = None
+        self._poster_worker = None
 
         self._build_ui()
         self._refresh_lib_list()
@@ -162,6 +165,22 @@ class SettingsPage(QWidget):
         self._scan_status = QLabel("就绪")
         self._scan_status.setObjectName("settingValue")
         layout.addWidget(self._scan_status)
+
+        # ---- 海报提取 (A 方案: 抽视频内嵌封面, 不联网刮削) ----
+        self._poster_btn = QPushButton("提取内嵌封面")
+        self._poster_btn.setObjectName("themeToggle")
+        self._poster_btn.setToolTip(
+            "从视频文件里抽出内嵌封面 (mkv/mp4 的 attached_pic 流), 存到 data/posters/。\n"
+            "没有内嵌封面时, 改用视频同目录下的 poster / cover / folder.jpg。\n"
+            "两者都没有就继续用首字母占位。全程不联网。\n"
+            "提取完切一下页面, 卡片上就会出现海报。"
+        )
+        self._poster_btn.clicked.connect(self._start_posters)
+        layout.addWidget(self._poster_btn)
+
+        self._poster_status = QLabel("海报: 未提取")
+        self._poster_status.setObjectName("settingValue")
+        layout.addWidget(self._poster_status)
 
         layout.addStretch()
 
@@ -327,3 +346,48 @@ class SettingsPage(QWidget):
         )
         self._scan_btn.setEnabled(True)
         self._scan_btn.setText("开始扫描")
+
+    # ------------------------------------------------------------------
+    # 海报提取 (A 方案: 本地内嵌封面, 不联网)
+    # ------------------------------------------------------------------
+    def _start_posters(self):
+        """抽内嵌封面。必须放线程里: 十几个 ffmpeg 子进程会把 UI 卡死。"""
+        if self._poster_worker is not None and self._poster_worker.isRunning():
+            return
+
+        # 只读配置, 不往里写 —— 那是用户数据
+        ffmpeg_path = detect_ffmpeg(
+            self.config.get("ffmpeg", {}).get("ffmpeg_path"))
+        if not ffmpeg_path:
+            self._poster_status.setText(
+                "海报: 找不到 ffmpeg (只有 ffprobe 不够, 抽图要 ffmpeg)")
+            return
+
+        self._poster_btn.setEnabled(False)
+        self._poster_btn.setText("正在提取...")
+        self._poster_status.setText("海报: 正在提取内嵌封面...")
+
+        self._poster_worker = PosterWorker(self.ffprobe_path, ffmpeg_path)
+        self._poster_worker.poster_progress.connect(self._on_poster_progress)
+        self._poster_worker.poster_finished.connect(self._on_poster_finished)
+        self._poster_worker.poster_error.connect(self._on_poster_error)
+        self._poster_worker.start()
+
+    def _on_poster_progress(self, title, source):
+        zh = {"cached": "已有", "embedded": "内嵌封面", "manual": "同目录图片",
+              "none": "没有封面", "failed": "失败"}
+        self._poster_status.setText(f"海报: {title} → {zh.get(source, source)}")
+
+    def _on_poster_error(self, msg):
+        self._poster_status.setText(f"海报错误: {msg}")
+
+    def _on_poster_finished(self, counts):
+        self._poster_status.setText(
+            f"海报完成: 内嵌 {counts.get('embedded',0)}  |  "
+            f"同目录 {counts.get('manual',0)}  |  "
+            f"已有 {counts.get('cached',0)}  |  "
+            f"没有 {counts.get('none',0)}  |  "
+            f"失败 {counts.get('failed',0)}"
+        )
+        self._poster_btn.setEnabled(True)
+        self._poster_btn.setText("提取内嵌封面")

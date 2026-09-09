@@ -20,6 +20,26 @@ def detect_ffprobe(custom: Optional[str] = None) -> Optional[str]:
     return _detect("ffprobe", custom)
 
 
+def detect_ffmpeg(custom: Optional[str] = None) -> Optional[str]:
+    """
+    ffmpeg 可执行文件 (抽内嵌封面用)。
+
+    ffprobe 找到了但 ffmpeg 不在 PATH 上时, 去它**同目录**再找一次 ——
+    官方构建 (含本机那个 WinGet 的 ffmpeg-full) 两个 exe 是放在一起的,
+    而用户往往只把其中一个的目录加进了 PATH。
+    """
+    found = _detect("ffmpeg", custom)
+    if found:
+        return found
+    probe = detect_ffprobe(None)
+    if probe:
+        exe = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
+        sibling = Path(probe).with_name(exe)
+        if sibling.is_file():
+            return str(sibling)
+    return None
+
+
 def detect_mpv(custom: Optional[str] = None) -> Optional[str]:
     """检测 mpv; custom 为设置里手动填写的路径 ('auto' 表示不指定)"""
     return _detect("mpv", custom)

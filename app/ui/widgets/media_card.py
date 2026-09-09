@@ -1,9 +1,12 @@
 """
-影视卡片组件 — 显示海报占位 + 画质角标 + 标题 + 年份 + 状态
+影视卡片组件 — 显示海报 + 画质角标 + 标题 + 年份 + 状态
 """
+import os
+
 from PySide6.QtWidgets import (
     QFrame, QLabel, QVBoxLayout,
 )
+from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, Signal
 
 from app.utils.quality import badges_from_media
@@ -36,7 +39,9 @@ class MediaCard(QFrame):
         poster.setAlignment(Qt.AlignCenter)
         poster.setStyleSheet("background-color: #1a1d28; border-radius: 8px 8px 0 0; font-size: 32px;")
         poster.setText(media.get("title", "?")[:1] if media else "?")
+        self._poster = poster
         layout.addWidget(poster)
+        self._apply_poster(media)
 
         # 画质角标 (4K / HDR10 / DV / 中字)
         # 原先卡片上完全看不出画质, 网格里分不清哪部是 4K Dolby Vision、
@@ -78,6 +83,27 @@ class MediaCard(QFrame):
 
     def set_media(self, media: dict):
         self._media_id = media.get("id")
+
+    def _apply_poster(self, media: dict):
+        """
+        有海报文件就显示图, 没有 (或解码失败) 就保持首字母占位。
+
+        封面几乎都是竖版 2:3, 而海报区是横的 160x132。直接 KeepAspectRatio 会在
+        左右各留三十多像素的黑边, 很难看; 所以用 KeepAspectRatioByExpanding 填满,
+        再居中裁一刀。IgnoreAspectRatio 会把人脸拉扁, 更不行。
+        """
+        src = (media or {}).get("poster")
+        if not src or not os.path.isfile(src):
+            return
+        pm = QPixmap(src)
+        if pm.isNull():
+            return                        # 文件在但解不出来 → 继续用占位, 别留一块空白
+        pm = pm.scaled(self.CARD_W, self.POSTER_H,
+                       Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        x = max(0, (pm.width() - self.CARD_W) // 2)
+        y = max(0, (pm.height() - self.POSTER_H) // 2)
+        self._poster.setPixmap(pm.copy(x, y, self.CARD_W, self.POSTER_H))
+        self._poster.setText("")
 
     def mousePressEvent(self, event):
         if self._media_id:
