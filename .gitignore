@@ -17,6 +17,7 @@ cinema_env/
 # 运行时数据 / 本机配置
 data/
 config.json
+LOCAL_NOTES.md
 
 # 测试缓存
 .pytest_cache/
