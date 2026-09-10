@@ -54,6 +54,11 @@ class LibraryPage(QWidget):
         self._sort.addItems(["名称", "年份", "添加时间", "最近观看"])
         self._sort.setFixedWidth(120)
         self._sort.currentTextChanged.connect(self._on_sort)
+        # recent 视图的排序在 refresh() 里写死"最近观看" (下拉值被无视),
+        # 留一个看着能切、点了没反应的下拉是误导 → 藏掉。只能用 hide():
+        # widget 拿到父级前调 show()/setVisible(True) 会闪成顶层窗口 (HANDOFF §4.26)。
+        if view == "recent":
+            self._sort.hide()
         header.addWidget(self._sort)
 
         layout.addLayout(header)

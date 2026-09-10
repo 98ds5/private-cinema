@@ -7,12 +7,31 @@
   - 存储信息: 视频文件总数 / 占用空间
   - 类型分布: 电影与动漫占比
 """
+import locale
 from typing import Dict, Any
 from sqlalchemy import func
 
 from app.database import get_session
 from app.models.tables import Episode, Media, MediaFile, Season
 from app.utils.quality import best_hdr, fmt_dur, has_chinese_subtitle
+
+# 名称/年份排序用系统 locale 的语言学规则: 中文系统 = 拼音序 + 英文大小写不敏感。
+# 只动 LC_COLLATE —— LC_NUMERIC/LC_TIME 等类别不受影响, 项目里也没有别的逻辑依赖它。
+# setlocale 失败时 strxfrm 退化成 C locale (码点序), 依然确定可用, 不必恐慌。
+try:
+    locale.setlocale(locale.LC_COLLATE, "")
+except locale.Error:
+    pass
+
+# 排序模式统一映射: UI 下拉传中文标签("名称"/"年份"/"添加时间"/"最近观看"),
+# 旧默认值是英文 "title", recent 视图传 "最近观看" —— 全部归一到四个内部模式。
+# 旧 bug: 服务端只认英文 "year", UI 的"年份"静默落进 else 变名称序 (HANDOFF §4.32)。
+_SORT_MODES = {
+    "名称": "title", "title": "title",
+    "年份": "year", "year": "year",
+    "添加时间": "added", "added": "added",
+    "最近观看": "recent", "recent": "recent",
+}
 
 
 def progress_text(position, duration) -> str:
@@ -200,17 +219,35 @@ class StatsService:
             if search:
                 q = q.filter(Media.title.ilike(f"%{search}%"))
 
-            if sort == "year":
-                q = q.order_by(Media.year.desc().nullslast())
-            elif sort == "添加时间":
-                q = q.order_by(Media.created_at.desc())
-            elif sort == "最近观看":
-                q = q.order_by(Media.last_watched_at.desc().nullslast())
-            else:
-                q = q.order_by(Media.title.asc())
-
             total = q.count()
-            items = q.offset(offset).limit(limit).all()
+
+            mode = _SORT_MODES.get((sort or "").strip(), "title")
+            if mode in ("title", "year"):
+                # SQLite 只有 BINARY 排序规则: 英文大小写敏感 (Zebra < apple),
+                # 中文按码点而非拼音。语言学规则塞不进 SQL → 取回全部符合行,
+                # Python 里用 locale.strxfrm 排序再手动分页。个人库量级
+                # (几百部以内) 全量取回完全可接受 (HANDOFF §4.32)。
+                rows = q.all()
+                if mode == "title":
+                    rows.sort(key=lambda m: (locale.strxfrm(m.title or ""), m.id))
+                else:
+                    # 年份降序, 没解析出年份 (NULL) 的垫底; 同年内按名称语言学排
+                    # (SQL 的 ORDER BY year DESC 对同值行顺序同样未定义, 实测跟着索引漂)
+                    rows.sort(key=lambda m: (m.year is None, -(m.year or 0),
+                                             locale.strxfrm(m.title or ""), m.id))
+                items = rows[offset:offset + limit]
+            else:
+                if mode == "added":
+                    # 添加时间降序 (最新在前); created_at 完全相同 (同一批扫描,
+                    # 真库 15 部只差微秒) 时按 id 降序保证确定性
+                    q = q.order_by(Media.created_at.desc(), Media.id.desc())
+                else:  # recent
+                    # 看过的按最近观看时间降序; 没看过的 (NULL) 全部垫底 ——
+                    # SQL 对 NULL 行的相对顺序未定义 (实测按 rowid 裸奔, 数据一动就漂),
+                    # 用添加时间降序兜底
+                    q = q.order_by(Media.last_watched_at.desc().nullslast(),
+                                   Media.created_at.desc(), Media.id.desc())
+                items = q.offset(offset).limit(limit).all()
 
             # 文件数与画质信息各用一次分组查询取回, 而不是逐个 m.files 懒加载:
             #   1. 避免 N+1 查询 (每部作品一次 SQL)
