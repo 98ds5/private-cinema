@@ -1,5 +1,13 @@
 # 私人影院 - Python 依赖
 # 安装: pip install -r requirements.txt
-# 注意: 需 Python >= 3.10 (本机 base 是 3.8.8, 请新建环境, 见 README)
+# 注意: 需 Python >= 3.10
+
+# 外部工具（非 pip）:
+# - mpv: 已内嵌在 _mpv/ 目录，无需额外安装
+# - ffprobe / ffmpeg: https://ffmpeg.org/download.html
+#   Windows: winget install ffmpeg 或 choco install ffmpeg
+#   macOS: brew install ffmpeg
+#   Linux: apt install ffmpeg
+
 PySide6>=6.5.0        # GUI 框架 (Qt 6)
 SQLAlchemy>=2.0.0     # ORM 框架

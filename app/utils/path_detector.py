@@ -31,7 +31,19 @@ def detect_ffmpeg(custom: Optional[str] = None) -> Optional[str]:
 
 
 def detect_mpv(custom: Optional[str] = None) -> Optional[str]:
-    """检测 mpv; custom 为设置里手动填写的路径 ('auto' 表示不指定)"""
+    """检测 mpv; custom 为设置里手动填写的路径 ('auto' 表示不指定)
+    检测顺序: 自定义路径 > 项目内嵌 _mpv/ > PATH > 同目录 > 常见安装位置"""
+    # 0. 自定义路径
+    if custom and custom != "auto" and Path(custom).is_file():
+        return custom
+
+    # 1. 项目内嵌 _mpv/ 目录（随源码或打包分发）
+    suffix = ".exe" if platform.system() == "Windows" else ""
+    bundled = Path(f"./_mpv/mpv{suffix}")
+    if bundled.is_file():
+        return str(bundled.resolve())
+
+    # 2. 走通用检测（PATH / 同目录 / 常见安装位置）
     return _detect("mpv", custom)
 
 

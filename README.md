@@ -30,8 +30,28 @@ pip install -r requirements.txt
 python main.py
 ```
 
-ffprobe / ffmpeg / mpv 不在包内: 程序启动时自动探测 PATH 与常见安装位置,
-也可在 `config.json` 里写死路径 (见 `app/utils/path_detector.py`)。
+### 外部依赖
+
+程序运行需要三个外部工具，检测顺序见 `app/utils/path_detector.py`：
+
+| 工具 | 用途 | 安装方式 |
+|------|------|---------|
+| **mpv** | 播放引擎（JSON IPC） | `.\scripts\download-mpv.ps1` 自动拉取到 `_mpv/` |
+| **ffprobe** | 解析视频参数（分辨率/编码/HDR） | [ffmpeg.org](https://ffmpeg.org/download.html) 或 `winget install ffmpeg` |
+| **ffmpeg** | 截取内嵌封面 | 同 ffprobe，官方构建两个 exe 放一起 |
+
+- **mpv**（~120 MB）不直接进 git 仓库，首次使用先运行下载脚本：
+
+  ```powershell
+  .\scripts\download-mpv.ps1
+  ```
+
+  脚本自动从 GitHub 获取最新发布版，解压并清理，只需跑一次。
+- **ffprobe / ffmpeg** 需自行安装或通过包管理器安装（`winget install ffmpeg` / `choco install ffmpeg`）
+- 也可在 `config.json` 的 `ffmpeg.ffprobe_path` 和 `player.mpv_path` 中写死路径
+
+> **打包分发版**不含此限制：`cinema.spec` 打包时会自动把 `_mpv/` 带进去，
+> 用户装完即用，无需运行下载脚本。
 
 ## 播放引擎
 
@@ -42,13 +62,32 @@ ffprobe / ffmpeg / mpv 不在包内: 程序启动时自动探测 PATH 与常见�
 
 引擎选择存在 `config.json` 的 `player.engine` 字段, 默认 MPV。
 
+## 打包构建
+
+用 PyInstaller 打包成单目录分发版（含 mpv），用户装完即用：
+
+```bash
+pip install pyinstaller
+pyinstaller cinema.spec
+```
+
+产物在 `dist\私人影院\`，运行 `私人影院.exe` 即可。
+
+也可用 `cinema.spec` 自定义输出路径和图标。
+
 ## 目录结构
 
 ```
 私人影院/
 ├── main.py                  # 程序入口
 ├── requirements.txt
+├── cinema.spec              # PyInstaller 打包配置 (打包时自动包含 _mpv/)
 ├── config.json              # 首次运行自动生成
+├── _mpv/                    # mpv 播放器 (运行 download-mpv.ps1 后生成)
+│   ├── mpv.exe
+│   └── d3dcompiler_43.dll
+├── scripts/
+│   └── download-mpv.ps1     # mpv 下载脚本
 ├── app/
 │   ├── database.py          # 数据库初始化 (WAL) + 会话管理
 │   ├── models/tables.py     # 5 张表: libraries/media/media_files/seasons/episodes
@@ -56,6 +95,7 @@ ffprobe / ffmpeg / mpv 不在包内: 程序启动时自动探测 PATH 与常见�
 │   ├── storage/local.py     # 本地文件存储 (预留扩展)
 │   ├── ui/                  # main_window + pages(页面) + widgets(卡片/播放条) + styles(QSS)
 │   └── utils/               # name_parser(文件名解析) quality(画质分级) config_utils 等
+├── .github/workflows/       # CI 配置
 ├── tools/                   # 离屏冒烟 / mpv 链路验证等开发脚本
 ├── tests/                   # pytest 回归 (~380 条)
 └── data/                    # 运行时自动创建 (数据库 + 海报缓存)

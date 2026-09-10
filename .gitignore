@@ -31,3 +31,6 @@ config.json
 build/
 dist/
 *.spec
+
+# mpv 内嵌包（CI / 下载脚本自动获取，不入库）
+_mpv/
