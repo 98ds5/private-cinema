@@ -1,24 +1,30 @@
 """
-外部工具路径检测 (ffprobe / mpv)。
-检测顺序: 设置页手动指定、系统 PATH、程序同目录、常见安装位置; 找不到返回 None。
+外部工具路径检测 (ffprobe / ffmpeg / mpv)。
+检测顺序: 设置页手动指定 > _tools/ 内嵌目录 > PATH > 同目录 > 常见安装位置。
 """
+import sys
 import shutil
 import platform
 from pathlib import Path
 from typing import Optional
 
 
+def _tools_dir() -> Path:
+    """获取内嵌工具目录 _tools/。支持源码模式与 PyInstaller 打包模式。"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包: _tools/ 在 _internal/ 下
+        return Path(sys.executable).parent / "_internal" / "_tools"
+    return Path("./_tools")
+
+
 def detect_ffprobe(custom: Optional[str] = None) -> Optional[str]:
-    """检测 ffprobe; custom 为设置里手动填写的路径 ('auto' 表示不指定)"""
-    return _detect("ffprobe", custom)
+    """检测 ffprobe"""
+    return _detect_bundled("ffprobe", custom)
 
 
 def detect_ffmpeg(custom: Optional[str] = None) -> Optional[str]:
-    """
-    ffmpeg 可执行文件 (抽内嵌封面用)。
-    ffprobe 找到但 ffmpeg 不在 PATH 上时, 去它同目录再找一次: 官方构建里两个 exe 放一起。
-    """
-    found = _detect("ffmpeg", custom)
+    """检测 ffmpeg (没找到则去 ffprobe 同目录找: 官方构建里两个 exe 放一起)"""
+    found = _detect_bundled("ffmpeg", custom)
     if found:
         return found
     probe = detect_ffprobe(None)
@@ -31,47 +37,46 @@ def detect_ffmpeg(custom: Optional[str] = None) -> Optional[str]:
 
 
 def detect_mpv(custom: Optional[str] = None) -> Optional[str]:
-    """检测 mpv; custom 为设置里手动填写的路径 ('auto' 表示不指定)
-    检测顺序: 自定义路径 > 项目内嵌 _mpv/ > PATH > 同目录 > 常见安装位置"""
-    # 0. 自定义路径
-    if custom and custom != "auto" and Path(custom).is_file():
-        return custom
-
-    # 1. 项目内嵌 _mpv/ 目录（随源码或打包分发）
-    suffix = ".exe" if platform.system() == "Windows" else ""
-    bundled = Path(f"./_mpv/mpv{suffix}")
-    if bundled.is_file():
-        return str(bundled.resolve())
-
-    # 2. 走通用检测（PATH / 同目录 / 常见安装位置）
-    return _detect("mpv", custom)
+    """检测 mpv"""
+    return _detect_bundled("mpv", custom)
 
 
-def _detect(tool: str, custom: Optional[str] = None) -> Optional[str]:
+def _detect_bundled(tool: str, custom: Optional[str] = None) -> Optional[str]:
+    """
+    带内嵌目录检测的统一查找:
+      1. 自定义路径
+      2. _tools/ 内嵌目录 (源码 / PyInstaller)
+      3. 系统 PATH
+      4. 程序同目录
+      5. 常见安装位置
+    """
     # 1. 自定义路径
     if custom and custom != "auto" and Path(custom).is_file():
         return custom
 
-    # 2. 系统 PATH
+    # 2. 内嵌 _tools/ 目录
+    suffix = ".exe" if platform.system() == "Windows" else ""
+    bundled = _tools_dir() / f"{tool}{suffix}"
+    if bundled.is_file():
+        return str(bundled.resolve())
+
+    # 3. 系统 PATH
     found = shutil.which(tool)
     if found:
         return found
 
-    # 3. 程序同目录
-    suffix = ".exe" if platform.system() == "Windows" else ""
+    # 4. 程序同目录
     local = Path(f"./{tool}{suffix}")
     if local.is_file():
         return str(local.resolve())
 
-    # 4. 常见安装位置
+    # 5. 常见安装位置
     system = platform.system()
     exe = f"{tool}{suffix}"
     if system == "Windows":
         candidates = [
             f"C:\\Program Files\\{tool}\\bin\\{exe}",
             f"C:\\Program Files (x86)\\{tool}\\bin\\{exe}",
-            # mpv 懒人包解压目录
-            f"D:\\Movie\\mpv\\mpv-lazy\\{exe}",
         ]
     elif system == "Darwin":
         candidates = [
