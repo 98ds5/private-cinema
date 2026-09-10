@@ -17,10 +17,10 @@ cinema_env/
 # 运行时数据 / 本机配置
 data/
 config.json
-LOCAL_NOTES.md
 
-# 课程/个人文档, 仅本地保留
-HANDOFF.md
+# 个人笔记与课程材料, 不入库
+开发笔记.md
+本地备忘.md
 1.0.txt
 需求分析和初步项目文档.txt
 
