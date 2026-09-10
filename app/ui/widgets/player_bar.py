@@ -1,16 +1,6 @@
 """
-底部「正在播放」状态条
-
-为什么只在 MPV 模式显示:
-  VividPlayer 是纯协议拉起, 没有 IPC —— 拿不到播放位置, 也发不了停止命令。
-  在这种模式下显示"正在播放"是一条无法验证的假信息 (我们并不知道它是否还在播),
-  所以直接不显示, 而不是显示一个空壳。
-  MPV 通过 JSON IPC 上报 position/duration 并接受命令, 状态条才有真实数据可填。
-
-由 PlayerService 的信号驱动:
-  playback_started   → show_playing(title)
-  playback_position  → update_position(pos, dur)
-  playback_finished  → clear()
+底部「正在播放」状态条, 由 PlayerService 的 playback_* 信号驱动。
+仅 MPV 模式显示: VividPlayer 纯协议拉起、无 IPC, 进度和停止都做不到。
 """
 from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QPushButton
 from PySide6.QtCore import Qt, Signal
@@ -73,9 +63,8 @@ class PlayerBar(QWidget):
 
     def update_position(self, position: int, duration: int):
         """MPV 上报进度时刷新时间显示"""
-        # 用 isHidden() 而不是 isVisible(): 后者是「有效可见性」, 依赖所有
-        # 祖先都可见 (窗口最小化/尚未 show 时为 False), 会让进度更新被静默丢弃。
-        # 这里只想在状态条被显式 clear() 隐藏时跳过。
+        # isHidden() 而非 isVisible(): 后者依赖祖先可见性,
+        # 窗口最小化时进度更新会被静默丢掉
         if self.isHidden():
             return
         if duration and duration > 0:

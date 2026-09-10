@@ -1,18 +1,8 @@
 """
-双版本双主题 — 两个完全不同的设计语言
-
-Version A: "Echo" — 编辑/建筑风格
-  DESIGN_VARIANCE: 8, VISUAL_DENSITY: 4
-  暖色调, 极简, 留白, 不对称, Deep Rose 强调
-
-Version B: "Prism" — 专业工具风格
-  VISUAL_DENSITY: 6
-  冷色调, 玻璃质感, 系统化, Teal 强调
+双版本双主题样式: Echo (暖色编辑风) / Prism (冷色工具风), 各含明暗两套
 """
 
-# ========================================================================
-# Version A: "Echo" — 编辑/建筑风格
-# ========================================================================
+# ---- Echo ----
 ECHO_DARK = """
 QMainWindow, QWidget#pageContent {
     background-color: #121212;
@@ -270,9 +260,7 @@ QScrollBar::handle:vertical:hover { background: #b0aca4; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 """
 
-# ========================================================================
-# Version B: "Prism" — 专业工具风格
-# ========================================================================
+# ---- Prism ----
 PRISM_DARK = """
 QMainWindow, QWidget#pageContent {
     background-color: #0f1117;
@@ -544,9 +532,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 """
 
 
-# ========================================================================
-# 版本 + 主题管理器
-# ========================================================================
+# ---- 版本 + 主题管理 ----
 VERSIONS = {
     "echo": {
         "name": "Echo (编辑风格)",
@@ -574,13 +560,8 @@ def load_theme(config: dict = None) -> str:
     return "dark"
 
 
-# ========================================================================
-# 追加控件的设计 token
-#
-# 为什么不直接写进上面 4 份 QSS: 同一控件要在 echo/prism × dark/light 四种
-# 组合里各写一遍, 4 处重复且容易漂移。这里集中一份 token 表, 由 get_qss 拼接。
+# 追加控件的取色表: 四种组合集中一处, 由 get_qss 拼到基础 QSS 后面
 # 元组含义: (强调色, 强调色上的文字, 强调色 hover, 表面色, 弱化文字色)
-# ========================================================================
 ACCENTS = {
     "echo": {
         "dark":  ("#c94b4b", "#ffffff", "#a83c3c", "#1e1e1e", "#8a8a8a"),
@@ -594,7 +575,7 @@ ACCENTS = {
 
 
 def _extra_qss(version: str, theme: str) -> str:
-    """生成详情页等新增控件的 QSS 片段 (跟随当前版本+主题取色)"""
+    """生成追加控件的 QSS 片段, 跟随当前版本+主题取色"""
     v = ACCENTS.get(version) or ACCENTS["echo"]
     accent, on_accent, hover, surface, muted = v.get(theme) or v["dark"]
 
@@ -689,6 +670,5 @@ def get_version_name(version: str) -> str:
     return VERSIONS.get(version, VERSIONS["echo"])["name"]
 
 
-# 配置持久化统一走 app.utils.config_utils（默认值 ← 磁盘 ← 本次修改 三层合并，
-# 局部字典不会抹掉其他配置键）。此处 re-export 以保持既有调用点不变。
+# re-export: 配置持久化统一走 app.utils.config_utils
 from app.utils.config_utils import save_config  # noqa: E402,F401

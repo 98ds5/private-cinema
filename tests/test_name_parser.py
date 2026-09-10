@@ -1,8 +1,6 @@
 """
-文件名解析器单元测试 — 先写测试再写实现 (答辩加分项)
-
-运行: python -m pytest tests/ -v
-说明: 用例覆盖需求文档 3.1.4 的解析规则: S##E## / EP## / (YYYY) / 年份过滤。
+文件名解析器单元测试: S##E## / EP## 判定动漫与季集号、
+年份提取与范围过滤、标题清洗剥离发行标记 (分辨率/来源/编码/压制组)。
 """
 import sys
 from pathlib import Path
@@ -84,12 +82,7 @@ class TestIsAnimeDirectory:
 
 
 class TestCleanTitle:
-    """
-    标题清洗回归测试。
-
-    用例全部取自真实片源命名 (用户媒体库实测), 用于锁住 Sonarr 式分类剥离
-    的行为, 防止后续调正则时退化。
-    """
+    """标题清洗回归: 用例取自真实片源命名, 锁住分类标记剥离行为"""
 
     def test_anime_folder_with_release_group(self):
         """整季包目录名: 季标记 + Complete + 音轨 + 编码 + 压制组全部剥掉"""
@@ -107,7 +100,7 @@ class TestCleanTitle:
         assert clean_title(raw) == "Pacific Rim"
 
     def test_year_at_end_of_string(self):
-        """年份位于末尾 (无后随分隔符) 也必须剥离 —— 曾经漏掉的边界"""
+        """末尾年份 (无后随分隔符) 也必须剥离"""
         assert clean_title("Interstellar.2014") == "Interstellar"
         assert clean_title("Inception.2010.1080p.BluRay.x264") == "Inception"
 
@@ -124,10 +117,7 @@ class TestCleanTitle:
         assert clean_title("One.Piece.EP07.1080p.WEB-DL") == "One Piece"
 
     def test_trailing_roman_numeral_not_eaten(self):
-        """
-        结尾的正常单词不能被当压制组吃掉。
-        这是「只剥破折号前缀 token」这条规则存在的理由。
-        """
+        """结尾的正常单词不能被当压制组吃掉 (只剥破折号前缀的 token)"""
         assert clean_title("Back to the Future Part II") == "Back to the Future Part II"
 
     @pytest.mark.parametrize("raw", [
@@ -148,10 +138,7 @@ class TestCleanTitle:
         assert clean_title("盗梦空间 (2010)") == "盗梦空间"
 
     def test_real_world_multilang_remux_name(self):
-        """
-        用户真实片源目录名: 多语言音轨列表 + Hybrid + Remux + DV/HDR + 压制组。
-        这条是实测发现的缺口 —— 简化过的测试名根本覆盖不到。
-        """
+        """真实片源目录名: 多语言音轨列表 + Hybrid + Remux + DV/HDR + 压制组"""
         raw = ("Pacific.Rim.2013.Eng.Fre.Ger.Ita.Por.Spa.Cze.Pol.Rus.Tur.Chi.Jpn"
                ".2160p.BluRay.Hybrid.Remux.DV.HDR.HEVC.Atmos-SGF")
         assert clean_title(raw) == "Pacific Rim"
@@ -163,10 +150,7 @@ class TestCleanTitle:
         "Greece Trip",
     ])
     def test_single_language_like_word_not_eaten(self, raw):
-        """
-        语言码只剥「连续 2 个以上」, 所以标题里单个形似语言码的词必须保留。
-        Indiana / Danish / Roman / Greece 都不能被吃掉。
-        """
+        """语言码只剥「连续 2 个以上」: 标题里单个形似语言码的词必须保留"""
         assert clean_title(raw) == raw
 
     def test_empty_input(self):

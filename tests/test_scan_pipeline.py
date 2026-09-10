@@ -1,14 +1,6 @@
 """
-扫描入库端到端回归测试
-
-覆盖:
-  1. 扁平布局 —— 文件直接躺在库根目录, 标题必须取文件名, 不能整库塌缩成一个作品
-  2. 嵌套布局 —— 「一片一文件夹」, 标题取目录名, 年份从目录名提取
-  3. 动漫 —— 自动建 Season / Episode, 且 media_files.episode_id 正确关联
-  4. 扩展名覆盖 —— .wmv / .iso / .vob 能被扫到, .txt 被忽略
-  5. 幂等 —— 重复扫描不产生重复记录
-  6. 统计 —— StatsService 聚合结果与入库数据一致
-  7. 丢失文件 —— 删除后重扫标记为 failed / 文件已丢失
+扫描入库端到端回归: 扁平 / 嵌套布局的标题与年份解析、动漫自动建季建集、
+扩展名覆盖与过滤、重复扫描幂等、统计聚合一致、丢失文件标记。
 """
 import os
 import sys
@@ -189,12 +181,7 @@ def test_nested_layout_title_from_folder(tmp_path, db):
 
 
 def test_library_list_all_views_after_scan(flat_lib):
-    """
-    影视库列表查询: 四个视图都要能返回数据。
-
-    回归锁: get_library_list 曾在 with 会话块外用 len(m.files) 懒加载关系,
-    会话已关 → DetachedInstanceError → 影视库页面永远 0 张卡片。
-    """
+    """扫描后 get_library_list 四个视图都能返回数据 (file_count 须在会话内算好)"""
     _scan()
     stats = StatsService()
 

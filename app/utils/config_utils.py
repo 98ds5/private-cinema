@@ -1,16 +1,7 @@
 """
-配置读写 —— 全项目唯一来源
-
-设计要点:
-  DEFAULT_CONFIG  唯一默认值定义, main.py 与 styles.py 都从这里取, 不再各自复制。
-  deep_merge      递归合并, 只覆盖 patch 中出现的键。
-  load_config     以默认值为基底合并磁盘配置 → 残缺文件也能得到完整结构。
-  save_config     以「默认值 ← 磁盘 ← 本次修改」三层合并后写盘 → 自愈。
-
-为什么 save_config 必须三层合并:
-  调用方可能只持有一个局部字典 (例如仅 {"ui": {"version": "echo"}})。
-  若直接整份覆盖, 会把 system / libraries / ffmpeg 等键全部抹掉,
-  下次启动读取 db_path 时 KeyError 崩溃 (本项目真实踩过)。
+配置读写 — 全项目默认值的唯一来源。
+load/save 都以「默认值 ← 磁盘 ← 本次修改」深合并, 所以调用方只传局部字典
+或文件损坏时, 也不会丢掉 system/ffmpeg 等键 (整份覆盖曾导致下次启动 KeyError)。
 """
 import json
 from pathlib import Path
@@ -60,8 +51,8 @@ def _defaults() -> Dict[str, Any]:
 
 def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
     """
-    加载配置。始终以默认值为基底, 再合并磁盘内容:
-    即使 config.json 残缺或损坏, 也一定返回结构完整的配置。
+    加载配置: 始终以默认值为基底合并磁盘内容, 即使 config.json 残缺或损坏,
+    也返回结构完整的配置。
     """
     config = _defaults()
 
@@ -73,7 +64,7 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
                 deep_merge(config, loaded)
                 return config
     except (json.JSONDecodeError, OSError):
-        pass  # 损坏 → 回退默认值
+        pass  # 损坏则回退默认值
 
     # 文件不存在或已损坏: 写出一份完整默认配置
     save_config(config, path)
@@ -82,8 +73,8 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
 
 def save_config(config: Dict[str, Any], path: Path = CONFIG_PATH) -> Dict[str, Any]:
     """
-    持久化配置。三层合并: 默认值 ← 磁盘现有 ← 本次修改。
-    返回合并后的完整配置 (调用方可直接用它替换自己手里的局部字典)。
+    持久化配置 (默认值 ← 磁盘现有 ← 本次修改 三层合并)。
+    返回合并后的完整配置, 调用方可直接用它替换自己手里的局部字典。
     """
     merged = _defaults()
 

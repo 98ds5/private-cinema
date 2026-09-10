@@ -1,11 +1,7 @@
 """
-播放进度持久化回归测试
-
-覆盖 _save_progress 的双粒度写入 (电影→media 表 / 动漫→episodes 表)
-以及动漫向 media 的聚合回写。
-
-回归锁: 动漫分支原先只写 episodes, 从不回写 media, 导致看完动漫后
-首页「已观看/观看中」始终为 0、「最近观看」永远不显示动漫。
+播放进度持久化回归: _save_progress 的双粒度写入
+(电影→media 表 / 动漫→episodes 表), 以及动漫向 media 的聚合回写
+(首页统计与「最近观看」的数据来源)。
 """
 import sys
 from datetime import datetime
@@ -51,8 +47,7 @@ def lib(tmp_path):
     worker = ScanWorker(LocalStorage())
     worker.run()
 
-    # 注意: 不要在 with 会话块里 yield —— 那会把读事务开着贯穿整个测试,
-    # 后续查询可能读到旧快照。先取值, 会话关闭后再 yield。
+    # 先取值再 yield: 别让会话读事务开着贯穿整个测试, 避免读到旧快照
     with get_session() as s:
         m = s.query(Media).filter(Media.title == "Inception").one()
         a = s.query(Media).filter(Media.title == "Some Anime").one()
@@ -63,12 +58,7 @@ def lib(tmp_path):
 
 
 def _episodes_of(media_id: int):
-    """
-    取某作品的全部集 → [(episode_id, episode_number), ...]
-
-    Episode 没有 media_id 字段, 关系是 Episode → Season → Media,
-    必须经 Season 关联。返回纯元组, 避免 ORM 实例脱离会话。
-    """
+    """某作品的全部集 → [(episode_id, episode_number), ...]; Episode 经 Season 关联"""
     with get_session() as s:
         return (
             s.query(Episode.id, Episode.episode_number)
@@ -119,9 +109,7 @@ def test_anime_progress_writes_episode(lib):
 
 
 def test_anime_rolls_up_to_media(lib):
-    """
-    动漫必须聚合回写 media —— 这是首页统计和「最近观看」的数据来源。
-    """
+    """动漫进度必须聚合回写 media 表"""
     ep_ids = [eid for eid, _num in _episodes_of(lib["anime_id"])]
 
     assert len(ep_ids) == 3

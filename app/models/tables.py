@@ -1,23 +1,15 @@
 """
-数据模型 — 共 5 张表
+数据模型 — 5 张表:
+  libraries    媒体库目录 (用户添加的扫描根目录: 电影库/动漫库/混合)
+  media        影视作品, 电影与动漫统一, 用 media_type 区分
+  media_files  视频文件, 一部作品可有多个版本 (一对多)
+  seasons      动漫季度 (仅动漫使用)
+  episodes     动漫单集, 每集对应一个视频文件
 
-设计要点 (答辩高频, 必须能讲清):
-  libraries    媒体库目录配置 — 用户添加的扫描根目录 (电影库 / 动漫库 / 混合)
-  media        影视作品 — 电影与动漫统一模型, 用 media_type 区分
-  media_files  视频文件 — 一部作品可有多个版本 (1080p / 4K / Remux), 一对多
-  seasons      动漫季度 — 仅动漫使用
-  episodes     动漫剧集 — 每集对应一个视频文件 (media_files.episode_id)
-
-为什么 Media 和 MediaFile 要分开?
-  一部电影可能同时存在多个文件 (多版本 / 多语言音轨), 如果合成一张表,
-  作品的标题/年份等信息会被重复存储、难以维护。分开后:
-  Media 存"是什么作品", MediaFile 存"哪个文件", 通过一对多关联。
-
-观看进度存哪里?
-  电影: 直接存 media.status / media.watched_position
-  动漫: 存 episodes.status / episodes.watched_position,
-        media 的整体状态由全部 episode 聚合得出 (全看过→已观看,
-        任一观看中→观看中, 全未看→未观看)。
+为什么 Media 与 MediaFile 分开: 同一作品常有多个文件 (多版本/多语言音轨),
+合成一张表会让标题、年份等重复存储难维护。分开后 Media 存"是什么作品",
+MediaFile 存"哪个文件", 一对多关联。观看进度: 电影存 media, 动漫存 episodes,
+作品整体状态由各集聚合得出。
 """
 from datetime import datetime
 
@@ -57,7 +49,7 @@ class Media(Base):
         nullable=False, index=True,
     )
     year = Column(Integer, index=True)
-    rating = Column(Float, default=0.0)                 # 0-10, V1.0 默认 0
+    rating = Column(Float, default=0.0)                 # 0-10, 默认 0
     director = Column(String(255))
     synopsis = Column(Text)
     poster_path = Column(String(512))
@@ -74,7 +66,7 @@ class Media(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-    # 关系: 一部作品 → 多个文件 / 多个季度
+    # 关系: 一部作品对应多个文件 / 多个季度
     files = relationship("MediaFile", back_populates="media",
                          cascade="all, delete-orphan")
     seasons = relationship("Season", back_populates="media",

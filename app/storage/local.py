@@ -1,8 +1,6 @@
 """
-本地文件系统操作封装 (StorageBackend 的本地实现)
-
-之所以单独抽一层: 需求文档 6.3 预留了扩展能力,
-后续支持 NAS/网盘时, 只要换一个实现, 扫描服务不用改。
+本地文件系统操作 (StorageBackend 的本地实现)。
+单独抽一层是为了留扩展口: 以后支持 NAS/网盘时换个实现, 扫描服务不用改。
 """
 from pathlib import Path
 from typing import List, Optional

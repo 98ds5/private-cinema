@@ -1,13 +1,6 @@
 """
-影视详情页 — 显示作品信息 + 文件/剧集列表 + 播放入口
-
-设计要点:
-  1. 会话内物化成纯 dict 再交给 UI。ORM 实例一旦脱离 Session, 访问未加载的
-     关系属性就会 DetachedInstanceError (本项目在 stats.py 踩过同一个坑)。
-  2. 播放粒度: 电影存 media 表, 动漫存 episodes 表 (见 models/tables.py 注释),
-     因此播放时必须把 episode_id 传给 PlayerService, 续播也要按集读取进度。
-  3. 不写死颜色: 全部用 objectName, 由 styles.get_qss 按当前版本+主题取色,
-     这样 Echo/Prism × 明/暗 四种组合都自动适配。
+详情页 — 作品信息 + 文件/剧集列表 + 播放入口
+数据在会话内物化成 dict 再交给 UI, 避免 DetachedInstanceError。
 """
 from typing import Optional
 import os
@@ -25,8 +18,7 @@ from app.utils.quality import format_tech_line, tech_tooltip
 
 
 class DetailPage(QWidget):
-    # 详情页海报区固定尺寸。提成类常量: 布局、_apply_poster、回归测试
-    # 三处都引用它, 别再各写各的魔数 (HANDOFF §4.27 的教训)。
+    # 海报区尺寸 (布局、_apply_poster 与测试共用)
     POSTER_W = 200
     POSTER_H = 280
 
@@ -37,17 +29,8 @@ class DetailPage(QWidget):
         self.media_id = media_id
         self.stats = stats_service
 
-        # 整页必须放进滚动区。
-        # 本页的 minimumSizeHint 实测是 1002x996 (200x280 海报 + 信息区 + 10 集列表),
-        # 而窗口小一点就只有 ~800x520。没有滚动区时 Qt 只能硬压 ——
-        # 实测小窗下 10 个选集行按钮**全部塌成高度 0** (y=358..358, 49x0),
-        # 主播放按钮被压成 97x11; 全屏 (2409x1352) 则一切正常。
-        # 用户报的"动漫详情页没有选集""播放键不对""全屏正常小窗口有问题"
-        # 三条其实是同一个根因。
-        #
-        # 形状照抄 SettingsPage (已验证可用): outer 零边距 → QScrollArea → container。
-        # 红线 (HANDOFF §4.7): 不要给 container 的布局设 setAlignment(),
-        # 也不要加 setRowStretch(); 顶部对齐用末尾的 addStretch() 实现。
+        # 整页放进滚动区, 否则小窗下内容会被硬压扁 (选集行压成高度 0)
+        # 不给布局设 setAlignment()/setRowStretch(), 顶部对齐靠末尾 addStretch()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -146,7 +129,6 @@ class DetailPage(QWidget):
                     "height": f.height,
                     "video_codec": f.video_codec,
                     "hdr_type": f.hdr_type,
-                    # 这几项原先没往 UI 传, 于是帧率/音轨/字幕轨在详情页全丢了
                     "frame_rate": f.frame_rate,
                     "audio_codec": f.audio_codec,
                     "audio_tracks": f.audio_tracks,
@@ -164,10 +146,7 @@ class DetailPage(QWidget):
     def _show_info(self, media: dict, files: list):
         self._clear_layout(self._info_layout)
 
-        # 海报: 有真图就显示图, 没有 (或路径失效/解码失败) 保持标题前两字占位。
-        # _load() 一直把 Media.poster_path 物化成 media["poster"], 但这里原先
-        # 从来没人消费它 → 影视库卡片有图、进详情页却永远是占位
-        # (用户报的"海报是有了, 但是进去详情页没有海报了", 根因即此)。
+        # 海报: 有图显示图, 路径失效/解码失败则保持前两字占位
         poster = QLabel(media["title"][:2] if media["title"] else "?")
         poster.setObjectName("posterPlaceholder")
         poster.setFixedSize(self.POSTER_W, self.POSTER_H)
@@ -180,6 +159,9 @@ class DetailPage(QWidget):
 
         name = QLabel(media["title"])
         name.setObjectName("pageTitle")
+        # 同 fileTitle: 长标题在高 DPI 下会把整页最小宽度顶爆, 显式夹住, 全文放 tooltip
+        name.setMinimumWidth(60)
+        name.setToolTip(media["title"])
         meta.addWidget(name)
 
         status_map = {
@@ -240,8 +222,7 @@ class DetailPage(QWidget):
 
         self._info_layout.addLayout(meta, stretch=1)
 
-        # 动漫叫"选集", 电影叫"视频文件" —— 用户报"没有选集"时,
-        # 一部分原因就是这个标题在动漫页上也写着"视频文件", 认不出来。
+        # 动漫标题叫"选集", 电影叫"视频文件"
         if media["media_type"] == "anime":
             self._files_title.setText(f"选集 · 共 {len(files)} 集")
         else:
@@ -250,18 +231,13 @@ class DetailPage(QWidget):
         self._show_files(media, files)
 
     def _apply_poster(self, label: QLabel, src: Optional[str]):
-        """
-        有海报文件就显示图, 没有 (或路径失效 / 解码失败) 就保持占位文字。
-
-        与 MediaCard._apply_poster 同一套路: 封面多为竖版 2:3, 海报区是
-        200x280, 直接 KeepAspectRatio 会左右留黑边; 用 KeepAspectRatioByExpanding
-        填满再居中裁一刀。IgnoreAspectRatio 会把人脸拉扁, 更不行。
-        """
+        """有海报显示图, 否则保持占位文字。
+        竖版封面填满横向海报区: KeepAspectRatioByExpanding + 居中裁切"""
         if not src or not os.path.isfile(src):
             return
         pm = QPixmap(src)
         if pm.isNull():
-            return                        # 文件在但解不出来 → 继续用占位, 别留一块空白
+            return                        # 解不出来: 继续用占位
         pm = pm.scaled(self.POSTER_W, self.POSTER_H,
                        Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         x = max(0, (pm.width() - self.POSTER_W) // 2)
@@ -286,7 +262,7 @@ class DetailPage(QWidget):
             row = QHBoxLayout()
             row.setSpacing(10)
 
-            # 每集/每文件独立播放入口 (动漫原来只能播第一个文件)
+            # 每集/每文件独立播放入口
             play = QPushButton("▶ 播放")
             play.setObjectName("rowAction")
             play.setCursor(Qt.PointingHandCursor)
@@ -307,11 +283,7 @@ class DetailPage(QWidget):
             name = QLabel(prefix + (f["file_name"] or ""))
             name.setObjectName("fileTitle")
 
-            # 技术信息单独一行放在文件名下面。
-            # 原先它和文件名挤在同一行, 而且只渲染 宽x高/编码/HDR/时长/体积,
-            # 其中 hdr_type == "SDR" 被**刻意隐藏**, 帧率/音轨/字幕轨一条都没显示
-            # → 用户报"视频画质信息不够明确, 比如 hdr 什么的"。
-            # 数据其实 25/25 全在库里, 纯粹是没往上传。
+            # 技术信息单独一行放在文件名下面
             tech = QLabel(format_tech_line(f))
             tech.setObjectName("fileMeta")
 
@@ -322,9 +294,8 @@ class DetailPage(QWidget):
             text_box = QWidget()
             text_box.setLayout(texts)
 
-            # QLabel 的 minimumSizeHint 等于整行文字的宽度。不设显式最小宽度的话,
-            # 一个长文件名或一长串技术参数就能把整页最小宽度顶到 1000px 以上,
-            # 而横向滚动条是关掉的 → 右侧被裁掉。完整内容都在 tooltip 里。
+            # QLabel 最小宽度等于整行文字宽, 长文本会把页面最小宽度顶大 → 显式设小,
+            # 完整内容放 tooltip
             name.setMinimumWidth(60)
             tech.setMinimumWidth(60)
             tip = tech_tooltip(f)
@@ -340,9 +311,7 @@ class DetailPage(QWidget):
     # 播放
     # ------------------------------------------------------------------
     def _pick_file(self, files: list) -> Optional[dict]:
-        """
-        默认播放目标: 动漫取第一个未看完的集, 电影/兜底取第一个文件。
-        """
+        """默认播放目标: 动漫取第一个未看完的集, 电影/兜底取第一个文件"""
         if not files:
             return None
 
@@ -361,10 +330,7 @@ class DetailPage(QWidget):
         return files[0]
 
     def _resume_position(self, media: dict, mf: dict) -> int:
-        """
-        续播起点。粒度必须和 _save_progress 的写入粒度一致:
-        动漫读 episodes.watched_position, 电影读 media.watched_position。
-        """
+        """续播起点。粒度必须与 _save_progress 一致: 动漫按集, 电影按 media"""
         if mf.get("episode_id"):
             with get_session() as s:
                 ep = s.query(Episode).filter(

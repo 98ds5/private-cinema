@@ -1,12 +1,6 @@
 """
-扫描入库服务 — 完整实现
-
-流程:
-  1. storage.list_videos() 递归收集所有视频文件
-  2. 对比数据库已有的 file_path → 识别新文件 / 已存在 / 已删除
-  3. 新文件: parse_filename → 建 Media / MediaFile (动漫还要建 Season/Episode)
-  4. 已删除文件标记为丢失
-  5. 文件大小变化 → 触发重新解析
+扫描入库: 递归收集视频文件, 与库里已有路径比对, 新文件建 Media/MediaFile
+(动漫再建 Season/Episode), 消失的标记为丢失, 大小变了的重新解析。
 """
 from pathlib import Path
 from datetime import datetime
@@ -44,7 +38,7 @@ class ScanWorker(QThread):
 
         try:
             with get_session() as session:
-                # 1. 获取所有启用的媒体库目录
+                # 所有启用的媒体库目录
                 libraries = session.query(Library).filter(
                     Library.scan_enabled == True
                 ).all()
@@ -53,13 +47,13 @@ class ScanWorker(QThread):
                     self.scan_finished.emit({**stats, "msg": "没有启用的媒体库目录"})
                     return
 
-                # 2. 收集数据库已有文件路径
+                # 库里已有的文件路径
                 existing_files = {
                     row.file_path
                     for row in session.query(MediaFile.file_path).all()
                 }
 
-                # 3. 遍历每个目录
+                # 逐个目录扫描
                 for lib in libraries:
                     if self._cancelled:
                         break
@@ -67,7 +61,6 @@ class ScanWorker(QThread):
                     lib_path = lib.path
                     media_type = lib.media_type  # movie / anime / mixed
 
-                    # 3a. 收集视频文件
                     files = self.storage.list_videos(lib_path, VIDEO_EXTENSIONS)
                     total = len(files)
 
@@ -79,7 +72,7 @@ class ScanWorker(QThread):
                         self.scan_progress.emit(idx + 1, total, fi.name)
 
                         if fp in existing_files:
-                            # 已存在 → 检查文件大小是否变化
+                            # 已存在: 检查文件大小是否变化
                             mf = session.query(MediaFile).filter(
                                 MediaFile.file_path == fp
                             ).first()
@@ -92,7 +85,7 @@ class ScanWorker(QThread):
                                 stats["skipped"] += 1
                             continue
 
-                        # 4. 新文件 → 入库
+                        # 新文件入库
                         try:
                             self._add_file(
                                 session, fp, fi, lib, media_type, lib_path,
@@ -103,7 +96,7 @@ class ScanWorker(QThread):
                             stats["errors"] += 1
                             self.scan_error.emit(f"{fi.name}: {e}")
 
-                    # 5. 标记该目录下已删除的文件
+                    # 标记该目录下已删除的文件
                     dir_files = {f.path for f in files}
                     missing = session.query(MediaFile).filter(
                         MediaFile.file_path.notin_(dir_files),
@@ -165,7 +158,7 @@ class ScanWorker(QThread):
         session.add(mf)
         session.flush()
 
-        # 如果是动漫且有季号 → 创建 Season / Episode
+        # 动漫且有季号: 创建 Season / Episode
         if mtype == "anime" and parsed.episode_number is not None:
             sn = parsed.season_number or 1
             season = session.query(Season).filter(

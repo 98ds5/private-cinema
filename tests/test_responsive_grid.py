@@ -1,15 +1,7 @@
 """
-响应式网格 —— 「缩小界面和全屏界面的资源窗口一样大而且结构一样」的修复锁。
-
-原来 `LibraryPage._render_cards` 把列数写死成 `i // 4, i % 4`:
-窗口缩到最小和拉到全屏都是 4 列、卡片一样大 —— 全屏时右边空一大片,
-缩小时横向又挤不下。现在列数由 `_cols_for(viewport 宽度)` 算出来,
-`resizeEvent` 防抖触发 `_reflow()` 重摆。
-
-设计上刻意把**建卡片**和**摆卡片**分开: 拖窗口只重摆, 不销毁重建 15 张卡片。
-
-⚠️ 所有涉及尺寸的断言都必须**真实等待**(`_settle`): resizeEvent → 防抖 60ms →
-重排, 光调 processEvents() 只过去几微秒, 什么都等不到。
+响应式网格回归锁: 列数随视口宽度变化、拖窗只重排不重建卡片、
+防抖 + 列数收敛、行间距恒定、QScrollArea 红线。
+尺寸断言必须真实等过防抖 (_settle), 非当前页切回来要按新宽度重排。
 """
 import time
 
@@ -36,7 +28,7 @@ def app():
 
 
 def _settle(app, page, width=None, seconds=0.4, height=None):
-    """改尺寸并**真实等过**防抖(60ms)+布局生效, 紧循环 processEvents 是等不到的"""
+    """改尺寸并真实等过防抖 (60ms) + 布局生效"""
     if width is not None or height is not None:
         page.resize(width if width is not None else page.width(),
                     height if height is not None else page.height())
@@ -47,11 +39,7 @@ def _settle(app, page, width=None, seconds=0.4, height=None):
 
 
 def _row_gap(page):
-    """
-    第 0 行底部到第 1 行顶部的实际像素距离。
-
-    卡片的 y() 是相对父级(_grid_host)的, 两张卡同一个爹, 可以直接相减。
-    """
+    """第 0 行底部到第 1 行顶部的实际像素距离 (卡片同父, y() 可直接相减)"""
     cols = page._cols
     if len(page._cards) <= cols:
         return None                      # 只有一行, 无从谈起行间距
@@ -165,7 +153,7 @@ class TestReflow:
         assert wide > narrow, f"全屏 {wide} 列 vs 缩小 {narrow} 列, 没有响应式效果"
 
     def test_fullscreen_uses_the_width(self, app, page):
-        """用户原话: 全屏时"一样大而且结构一样不合适" —— 右边不该空一大片"""
+        """全屏时右边不该空一大片, 列数要吃满宽度"""
         _settle(app, page, 1600)
         assert page._cols >= 6, f"1600 逻辑像素只排了 {page._cols} 列"
 
@@ -263,10 +251,7 @@ class TestDebounce:
             page._place_cards = orig
 
     def test_same_column_count_does_not_relayout(self, app, page):
-        """
-        收敛守卫: 列数没变就不该动网格。
-        没有它, 滚动条出现/消失会改变视口宽度 → 列数在两个值之间来回抖。
-        """
+        """列数没变就不重排: 防止滚动条增减改变视口宽度引起震荡"""
         _settle(app, page, 900)
         calls = []
         page._place_cards = lambda *a, **k: calls.append(1)
@@ -290,7 +275,7 @@ class TestDebounce:
 
 
 # ==========================================================================
-# QScrollArea 红线 (HANDOFF §4.7)
+# QScrollArea 红线
 # ==========================================================================
 class TestScrollAreaRedLines:
     def test_grid_has_no_alignment(self, page):
@@ -309,12 +294,7 @@ class TestScrollAreaRedLines:
 
 
 # ==========================================================================
-# 行间距: 用户报「相邻列之间没问题, 但行之间有问题, 距离会随着窗口变大拉伸」
-#
-# 根因: QScrollArea(widgetResizable=True) 把宿主撑到 max(视口, minimumSizeHint),
-# 窗口一高, 多出来的高度就被 QGridLayout 平摊到每一行 → 竖间距跟着变大。
-# 列数变多以后行数变少(15 部从 4 行变 2 行), 同样的多余高度摊到更少的行上,
-# 缝隙就格外明显 —— 所以这个毛病是响应式网格上线后才被看见的。
+# 行间距: 宿主被撑高后多余平摊进各行, 间距必须恒定不随窗口尺寸变化
 # ==========================================================================
 class TestRowSpacing:
     def test_row_gap_is_constant_across_window_heights(self, app, page):
@@ -351,10 +331,7 @@ class TestRowSpacing:
         assert all(y == first for _, y in ys), f"首行 y 随窗口高度变了: {ys}"
 
     def test_grid_host_is_not_stretched_to_the_viewport(self, app, page):
-        """
-        宿主高度应该等于内容实际需要的高度, 而不是被撑到视口高。
-        被撑高正是行间距拉伸的直接原因。
-        """
+        """宿主高度应等于内容实际需要的高度, 不被撑到视口高"""
         _settle(app, page, 900, 0.35, height=1600)
         rows = -(-len(page._cards) // page._cols)          # 向上取整
         need = rows * MediaCard.CARD_H + (rows - 1) * LibraryPage.GRID_SPACING
@@ -375,7 +352,7 @@ class TestRowSpacing:
 @pytest.fixture
 def win(app, tmp_path):
     _seed(tmp_path)
-    cfg = load_config()                      # 绝不传 {} (HANDOFF §4.1)
+    cfg = load_config()                      # 必须用真实配置, 不能传 {}
     cfg["system"]["db_path"] = str(tmp_path / "cinema.db")
     w = MainWindow(cfg, ffprobe_path=None, mpv_path=None)
     w.setAttribute(Qt.WA_DontShowOnScreen, True)
@@ -399,11 +376,7 @@ class TestThroughMainWindow:
         assert len(_library_pages(win)) == 4
 
     def test_widen_then_narrow_changes_columns(self, app, win):
-        """
-        ⚠️ 必须先把页面设成**当前页**再量: QStackedWidget 里非当前页是隐藏的,
-        隐藏页收不到 resizeEvent, 量到的会是构造时的旧宽度
-        (第一版就是这么写的, 1600 和 700 都读出 3 列, 看着像响应式失效)。
-        """
+        """先把页面设为当前页再量: 隐藏页收不到 resizeEvent, 读到的是旧宽度"""
         page = next(p for p in _library_pages(win) if p._cards)
         win.pages.setCurrentWidget(page)
         _settle(app, win, None, 0.3)
@@ -420,10 +393,7 @@ class TestThroughMainWindow:
         assert wide > narrow, f"拉宽 {wide} 列 / 缩小 {narrow} 列, 没有响应式效果"
 
     def test_page_hidden_during_resize_catches_up_when_shown(self, app, win):
-        """
-        真实操作顺序: 在首页把窗口拉宽 → 再点"全部影视"。
-        那个页面在拉宽时是隐藏的, 切过来时必须按**新**宽度重排, 不能停在旧列数。
-        """
+        """页面隐藏期间拉宽窗口, 切回来时必须按新宽度重排"""
         page = next(p for p in _library_pages(win) if p._cards)
         win.pages.setCurrentWidget(win._home_page)
         _settle(app, win, None, 0.3)

@@ -1,18 +1,7 @@
 """
-FFprobe 媒体参数解析服务 — 框架骨架 (实现在排期 第5-6天)
-
-调用方式 (需先自己跑一次看输出, 答辩要能解释):
-  ffprobe -v quiet -print_format json -show_format -show_streams "文件路径"
-  → JSON: format.{duration,size,format_name} + streams[] (codec_type 区分视频/音频/字幕)
-
-解析内容: 时长/分辨率/帧率/视频编码/HDR/音频/字幕/容器 (见需求文档 3.2.2)
-
-HDR 检测策略 (优先级从高到低, 需求文档 3.2.3):
-  1. 视频流 side_data 含 DOVI → Dolby Vision
-  2. video stream side_data 含 "HDR Dynamic" → HDR10+
-  3. color_transfer=smpte2084 且 color_primaries=bt2020 → HDR10
-  4. color_transfer=arib-std-b67 且 color_primaries=bt2020 → HLG
-  5. 以上都不满足 → SDR
+ffprobe 参数解析服务: 对 parse_status=pending 的文件逐个探测, 把时长/分辨率/帧率/
+编码/HDR/音轨/字幕写回 MediaFile。
+命令形式: ffprobe -v quiet -print_format json -show_format -show_streams <文件路径>
 """
 import json
 import subprocess
@@ -24,7 +13,7 @@ from PySide6.QtCore import QThread, Signal
 from app.models.tables import MediaFile
 from app.database import get_session
 
-# 单文件解析超时 (需求文档 3.2.4: 60 秒)
+# 单个文件解析超时(秒)
 PROBE_TIMEOUT = 60
 
 
@@ -45,7 +34,7 @@ class ParseWorker(QThread):
         self._cancelled = True
 
     def run(self):
-        """实现解析主流程"""
+        """主流程: 逐个解析 pending 文件并写回结果"""
         self.parse_started.emit(0)
 
         try:
@@ -113,7 +102,7 @@ class ParseWorker(QThread):
             return None
 
     def _apply(self, mf: MediaFile, data: dict):
-        """把 ffprobe JSON 写入 MediaFile 字段 (骨架已含逻辑, 第5-6天核对)"""
+        """把 ffprobe 返回的 JSON 写入 MediaFile 字段"""
         fmt = data.get("format", {})
         mf.duration = int(float(fmt.get("duration", 0)))
         mf.file_size = int(fmt.get("size", mf.file_size))
@@ -154,7 +143,10 @@ class ParseWorker(QThread):
 
     @staticmethod
     def _detect_hdr(vs: dict) -> str:
-        """按需求文档 3.2.3 的优先级检测 HDR 类型"""
+        """
+        按优先级检测 HDR 类型: side_data 里的 DOVI / HDR Dynamic,
+        再看 color_transfer (smpte2084=HDR10, arib-std-b67=HLG, 需 bt2020), 都不满足就是 SDR。
+        """
         for sd in vs.get("side_data_list", []):
             t = sd.get("side_data_type", "")
             if "DOVI" in t.upper():

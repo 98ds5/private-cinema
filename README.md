@@ -1,38 +1,44 @@
-# 私人影院 (私人影视资源管理系统) — V1.0
+# 私人影院 — 本地影视资源管理
 
-面向个人的本地影视资源管理: **扫描入库 → FFprobe 参数解析 → MPV 播放/续播 → 数据统计**。
-课设项目。技术栈: Python 3.10+ / PySide6 / SQLAlchemy 2.0 / SQLite / ffprobe / mpv。
+用 PySide6 写的本地影视库桌面应用：扫描目录入库、解析视频参数、管理海报、
+双引擎播放与续播、数据统计。课设项目。
 
-需求与排期文档见同目录 `需求分析和初步项目文档.txt` 与 `1.0.txt`。
+技术栈: Python 3.10+ / PySide6 / SQLAlchemy 2.0 + SQLite / ffprobe / mpv
+
+## 功能
+
+- **影视库**: 添加目录后递归扫描, 发行组命名自动解析出标题/年份/季集号, 动漫和电影同一流程
+- **参数解析**: ffprobe 提取分辨率、帧率、编码、HDR 类型、音轨/字幕语言, 详情页展示
+- **海报**: 完全离线的四级兜底 —— 手动图 > 内嵌封面 > ffmpeg 截帧 > 标题文字占位
+- **播放**: MPV 引擎 (命名管道 JSON IPC, 每 10 秒轮询进度, 按集记录、可续播)
+  或 VividPlayer 引擎 (协议启动, 适合 HDR 原盘), 设置页切换
+- **统计与排序**: 在看列表、总数统计; 名称/年份/添加时间/最近观看四种排序 (中文按拼音序)
+- **界面**: 两套设计语言 x 明暗双主题, 网格随窗口宽度重排, 小窗口下布局不塌陷
 
 ## 快速开始
 
 ```bash
-# 1. 环境 (本机 base Python 是 3.8.8, 版本不够, 必须新建)
+# 环境 (需 Python 3.10+)
 conda create -n cinema python=3.11 -y
 conda activate cinema
 # 或 python -m venv venv && venv\Scripts\activate
 
-# 2. 依赖
+# 依赖
 pip install -r requirements.txt
 
-# 3. 外部工具
-#    ffprobe 本机已装 ✓ (C:\Users\...\Gyan.FFmpeg\...\ffprobe.exe)
-#    mpv     本机已装 ✓ (D:\<mpv>\mpv-lazy\mpv.exe)
-#    VividPlayer 本机已装 ✓ (微软商店版)
-
-# 4. 运行 (双击可运行导航壳; 业务功能未实现会看到 TODO 占位)
+# 运行
 python main.py
 ```
 
+ffprobe / ffmpeg / mpv 不在包内: 程序启动时自动探测 PATH 与常见安装位置,
+也可在 `config.json` 里写死路径 (见 `app/utils/path_detector.py`)。
+
 ## 播放引擎
 
-支持两种播放器, 在设置页切换:
-
-| 引擎 | 方式 | 进度追踪 | 续播定位 | 推荐场景 |
-|------|------|---------|---------|---------|
-| **MPV** | 子进程 + JSON IPC 命名管道 | 精确 (每10秒轮询) | ✅ 支持 | 标清/高清, 需要精确管理 |
-| **VividPlayer** | 协议启动 | 无（纯播放，不追踪） | ❌ 不支持 | HDR 大片，不关心进度 |
+| 引擎 | 方式 | 进度追踪 | 续播 | 适合 |
+|------|------|---------|------|------|
+| MPV | 子进程 + JSON IPC 命名管道 | 每 10 秒轮询 | 支持, 按集记忆 | 日常, 需要精确管理 |
+| VividPlayer | 协议启动 | 无 | 不支持 | HDR 原盘 |
 
 引擎选择存在 `config.json` 的 `player.engine` 字段, 默认 MPV。
 
@@ -46,31 +52,11 @@ python main.py
 ├── app/
 │   ├── database.py          # 数据库初始化 (WAL) + 会话管理
 │   ├── models/tables.py     # 5 张表: libraries/media/media_files/seasons/episodes
-│   ├── services/            # scanner(扫描) / parser(解析) / player(播放) / stats(统计)
+│   ├── services/            # scanner(扫描) parser(解析) player(播放) posters(海报) stats(统计)
 │   ├── storage/local.py     # 本地文件存储 (预留扩展)
-│   ├── ui/                  # main_window + pages + widgets + styles(QSS深色)
-│   └── utils/               # name_parser(文件名解析) / format_utils / path_detector / constants
-├── tests/test_name_parser.py   # 文件名解析单测
-├── data/cinema.db           # 运行时自动创建
-└── docs/  …                 # (文档 txt 暂放项目根, 答辩前整理进 docs/)
+│   ├── ui/                  # main_window + pages(页面) + widgets(卡片/播放条) + styles(QSS)
+│   └── utils/               # name_parser(文件名解析) quality(画质分级) config_utils 等
+├── tools/                   # 离屏冒烟 / mpv 链路验证等开发脚本
+├── tests/                   # pytest 回归 (~380 条)
+└── data/                    # 运行时自动创建 (数据库 + 海报缓存)
 ```
-
-## 当前进度 (框架阶段)
-
-- [x] 项目骨架 + 目录结构 + 可运行导航壳
-- [x] 数据库 5 张表 (models/tables.py)
-- [x] 工具类: name_parser / format_utils / path_detector / constants
-- [x] 文件名解析器单元测试
-- [ ] 扫描入库 scanner.py      ← 排期 第3-4天
-- [ ] FFprobe 解析 parser.py   ← 第5-6天
-- [ ] UI 列表/详情页            ← 第7-8天
-- [ ] MPV 播放 player.py        ← 第9-10天
-- [ ] 统计 stats.py + 首页      ← 第11天
-- [ ] 设置 settings_page        ← 第12天
-- [ ] 联调/测试/文档/打包       ← 第13-14天
-
-## 答辩随身卡
-
-高频问题与回答要点见 `1.0.txt` 第七节 (SQLite 为什么、Media/MediaFile 为什么分开、
-怎么识别电影动漫、怎么保证扫描不重复、MPV 怎么取进度、进度保存策略、ffprobe 怎么调、
-为什么 QThread、数据量大怎么办)。

@@ -1,7 +1,5 @@
 """
-首页 — 概览 (接入 StatsService 真实数据)
-
-展示统计数字卡片 + 最近观看列表。
+首页 — 统计数字卡片 + 最近观看列表, 数据来自 StatsService
 """
 from typing import Optional
 
@@ -49,17 +47,7 @@ class StatCard(QFrame):
 
 
 class RecentRow(QFrame):
-    """
-    「最近观看」的一行。
-
-    原先这几行是把裸 QLabel 塞进 QHBoxLayout 再包个 QWidget: 没有按钮、
-    没有 mousePressEvent、没有手型光标、没有任何信号 —— 看着像列表,
-    实际上点不动。用户报"最近观看也无法点进去具体看的哪个继续看"就是它。
-
-    现在给了两个动作, 分别对应用户那句话的两半:
-      ▶ 继续观看 (点整行也一样) → 从上次的进度直接续播
-      详情                      → 进详情页, 能看清是哪一集、也能改看别的集
-    """
+    """「最近观看」的一行: 整行可点续播, 「详情」进详情页"""
     resume_clicked = Signal(dict)
     detail_clicked = Signal(int)
 
@@ -80,7 +68,7 @@ class RecentRow(QFrame):
         title.setMinimumWidth(60)
         row.addWidget(title, stretch=1)
 
-        # 动漫要显式说出是第几集 —— "无法点进去具体看的哪个"的"哪个"就是它
+        # 动漫要显式说出是第几集
         ep_no = item.get("episode_number")
         if ep_no:
             ep = QLabel(f"第{ep_no}集")
@@ -91,8 +79,7 @@ class RecentRow(QFrame):
         prog.setObjectName("recentMeta")
         row.addWidget(prog)
 
-        # 进度为 0 时写"继续观看"是假的 (用户点开就关了, 什么都没看),
-        # 按实际进度切文案, 免得按钮和它右边那行字自相矛盾
+        # 进度为 0 时按钮写「播放」而不是「继续观看」
         pos = int(item.get("position") or 0)
         self._resume_btn = QPushButton("▶ 继续观看" if pos > 0 else "▶ 播放")
         self._resume_btn.setObjectName("recentResume")
@@ -112,7 +99,7 @@ class RecentRow(QFrame):
             lambda: self.detail_clicked.emit(self._media_id))
         row.addWidget(detail_btn)
 
-        # 整行也可点 = 续播, 符合"点进去继续看"的直觉
+        # 整行点击 = 续播
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(
             f"{item.get('title') or ''}\n{item.get('file_path') or '（没有记录到视频文件）'}"
@@ -175,8 +162,7 @@ class HomePage(QWidget):
         self._recent_container = QFrame()
         self._recent_container.setObjectName("mediaCard")
         self._recent_layout = QVBoxLayout(self._recent_container)
-        # 不再 setAlignment(AlignCenter): 那会把每行压到 sizeHint 宽度,
-        # 行内的 stretch 失效, 按钮全挤到中间而不是靠右。列表行应该占满宽度。
+        # 不设 setAlignment(AlignCenter): 会把行压到 sizeHint 宽, stretch 失效
         self._recent_placeholder = QLabel("暂无最近观看记录\n添加媒体库目录后自动扫描入库")
         self._recent_placeholder.setAlignment(Qt.AlignCenter)
         self._recent_placeholder.setStyleSheet("color: #636366; font-size: 12px;")
@@ -216,16 +202,12 @@ class HomePage(QWidget):
 
     def _update_recent(self, items: list):
         """更新最近观看列表"""
-        # 清空旧内容 —— 但**不能顺手把占位符也 deleteLater 掉**:
-        # 它是在构造函数里建好、空列表时要重新塞回来的同一个实例。
-        # 原先无差别 deleteLater, 于是"刷新一次(空) → 再刷新"时占位符已被销毁。
+        # 清空旧行, 但保留占位符实例 (空列表时还要塞回来)
         while self._recent_layout.count():
             item = self._recent_layout.takeAt(0)
             w = item.widget()
             if w is not None and w is not self._recent_placeholder:
-                # takeAt 只是把它从布局里摘出来, 控件仍是 _recent_container 的子级,
-                # 在 deleteLater 真正生效前会继续画在老位置上 → 先 hide() 掉。
-                # 不做 setParent(None): 这里没必要 (没有卡片那种成倍堆积问题)。
+                # takeAt 后控件仍是子级, deleteLater 生效前会画在老位置 → 先 hide()
                 w.hide()
                 w.deleteLater()
 

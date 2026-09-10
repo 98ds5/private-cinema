@@ -1,18 +1,7 @@
 """
-「最近观看」可点 + 续播的回归锁。
-
-用户报"最近观看也无法点进去具体看的哪个继续看"。取证结果两半都是真的:
-
-1. **点不动**: `home_page._update_recent` 把裸 QLabel 塞进 QHBoxLayout 再包个
-   QWidget —— 没有按钮、没有 mousePressEvent、没有手型光标、没有任何信号。
-2. **看不出是哪个**: `stats.get_recently_watched` 只返回
-   id/title/media_type/watched_at 和裸字符串 `progress = f"{pos}/{dur}s"`,
-   于是首页显示 "1440/1440s" 这种东西; 而且它**没有 episode_id** ——
-   动漫的进度写在 episodes 表 (见 player._save_progress), 不回查就不知道
-   看的是第几集, 也就没法把 episode_id 传给 PlayerService.play()。
-
-⚠️ 点击一律用 QTest.mouseClick 打真实控件, 不直接 emit 信号 ——
-   直接 emit 会绕过 mousePressEvent / 按钮 enabled 这些真正会坏掉的环节。
+「最近观看」回归锁: 进度文案格式化、查询返回集数 / episode_id / 最近一集文件路径、
+首页行可点击续播、点击路由到 PlayerService 与 DetailPage。
+点击一律用 QTest.mouseClick 打真实控件, 不直接 emit 信号。
 """
 from datetime import datetime, timedelta
 
@@ -39,13 +28,8 @@ def app():
 
 
 def _seed(tmp_path):
-    """
-    建一个三部作品的临时库:
-      动漫 (3 集, 刚用 _save_progress 把进度写在第 3 集)   ← 最新
-      电影 (1 个文件, 进度写在 media 表, 看到一半)          ← 一天前
-      幽灵条目 (有 last_watched_at 但一个文件都没有)         ← 三天前
-    返回 {名称: id} 与关键路径。
-    """
+    """三部作品的临时库: 动漫进度在第 3 集 (最新)、电影看到一半 (一天前)、
+    幽灵条目无文件 (三天前); 返回 {名称: id} 与关键路径"""
     init_database(str(tmp_path / "cinema.db"))
     now = datetime.now()
 
@@ -127,7 +111,7 @@ class TestRecentlyWatchedQuery:
             ["Cyberpunk Edgerunners", "Inception", "幽灵条目"]
 
         anime = items[0]
-        # 关键: 必须认出看的是第 3 集, 并且给出**第 3 集**的文件路径
+        # 必须认出看的是第 3 集, 并给出第 3 集的文件路径
         assert anime["episode_number"] == 3
         assert anime["episode_id"] == seeded["ep3"]
         assert anime["file_path"] == seeded["anime_file"], \
@@ -148,7 +132,7 @@ class TestRecentlyWatchedQuery:
         assert ghost["file_path"] is None, "没文件就不该编一个路径出来"
 
     def test_raw_progress_string_is_gone(self, seeded):
-        """原先甩给 UI 的是 '1440/1440s' 这种裸串"""
+        """返回的是 progress_text 文案字段, 不再是裸进度串"""
         for item in StatsService().get_recently_watched(5):
             assert "progress" not in item
             assert "progress_text" in item
@@ -238,10 +222,7 @@ class TestHomePageRows:
         assert got == [], "文件都不存在了还发续播信号, 只会换来一个报错弹窗"
 
     def test_placeholder_survives_repeated_refresh(self, app, tmp_path):
-        """
-        空库时占位符要能反复塞回去。原先清空逻辑无差别 deleteLater, 把构造函数里
-        建好的那个占位符也销毁了 —— 空库刷新两次就 RuntimeError。
-        """
+        """空库反复 refresh, 占位符不能被销毁、要能反复塞回去"""
         init_database(str(tmp_path / "empty.db"))
         page = HomePage(stats_service=StatsService())
         page.setAttribute(Qt.WA_DontShowOnScreen, True)
@@ -259,7 +240,7 @@ def win(app, tmp_path, monkeypatch):
     """真 MainWindow + 同一个临时库; 播放器和模态框都被换成记录器"""
     seeded = _seed(tmp_path)
 
-    cfg = load_config()                      # 绝不传 {} (HANDOFF §4.1)
+    cfg = load_config()                      # 必须用真实配置, 不能传 {}
     cfg["system"]["db_path"] = str(tmp_path / "cinema.db")
 
     # 播放失败会走 QMessageBox.warning(modal) → 测试里必须顶掉, 否则永久阻塞
@@ -280,9 +261,8 @@ def win(app, tmp_path, monkeypatch):
     for _ in range(3):
         app.processEvents()
     w._calls, w._dialogs = calls, dialogs
-    # ⚠️ 种子数据挂在 window 上, 测试**不要**再另外要 `seeded` fixture:
-    #    win 和 seeded 都请求 tmp_path, 同一个测试里 pytest 给的是同一个目录,
-    #    于是 _seed 跑两遍 → media_files.file_path UNIQUE 冲突。
+    # 种子数据挂在 window 上: 测试不要再另外要 seeded fixture ——
+    # 两者共用 tmp_path, _seed 跑两遍会导致 file_path UNIQUE 冲突。
     w._seeded = seeded
     return w
 
@@ -300,8 +280,7 @@ class TestMainWindowSeam:
         call = win._calls[0]
         assert call["file_path"] == seeded["anime_file"]
         assert call["media_id"] == seeded["anime"]
-        # episode_id 必须传: 不传的话 _save_progress 会把动漫进度写到 media 表,
-        # 看完也永远不进"已观看"统计
+        # episode_id 必须传: 否则动漫进度会错写到 media 表, 不进统计
         assert call["episode_id"] == seeded["ep3"]
         assert call["start_pos"] == 754, "没从上次的进度续播"
         assert win._dialogs == []
@@ -333,10 +312,7 @@ class TestMainWindowSeam:
         assert isinstance(win.pages.currentWidget(), DetailPage)
 
     def test_open_detail_does_not_leak_pages(self, win, app):
-        """
-        原先 LibraryPage 每点一张卡片就 addWidget 一个新 DetailPage, 旧的既不隐藏
-        也不销毁, 点几十次攒几十个孤儿页。收拢到 _open_detail 后必须只有一个。
-        """
+        """反复打开详情页不得累积孤儿页, 始终只保留一个"""
         before = win.pages.count()
         for _ in range(5):
             win._open_detail(win._seeded["anime"])

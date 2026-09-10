@@ -1,23 +1,5 @@
-"""
-维护工具: 用当前解析器重算存量作品标题
-
-为什么需要:
-  解析器 (app/utils/name_parser.py) 只在扫描「新文件」时推导标题,
-  已入库的记录不会自动重算。所以每次改进 clean_title 之后,
-  库里的旧脏标题会一直留着 (本项目实测: 'Pacific Rim Eng Fre Ger…'
-  在算法修好后仍然留在库里)。
-
-安全设计:
-  - 默认 dry-run, 只报告差异, 必须显式加 --apply 才写库
-  - 干净标题重算结果不变 (tests/test_name_parser.py 已保证中文标题原样保留),
-    所以重复执行是幂等的
-  - 改名后若与其他作品 (title, media_type) 撞车, 拒绝写入并报告,
-    合并策略需要人工决定
-
-用法:
-  cd 私人影院
-  cinema_env\\python.exe tools\\refresh_titles.py            # 只看差异
-  cinema_env\\python.exe tools\\refresh_titles.py --apply    # 实际写入
+"""维护工具: 用当前解析器重算存量作品标题 (解析器只对新扫描文件生效, 旧记录需本脚本重算)。
+默认 dry-run 只报告差异, 加 --apply 才写库; 与已有作品重名时拒绝写入, 合并需人工处理。
 """
 import argparse
 import os

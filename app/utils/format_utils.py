@@ -2,7 +2,7 @@
 
 
 def format_duration(seconds: int) -> str:
-    """秒数 → HH:MM:SS (不足 1 小时显示 MM:SS)"""
+    """秒数转成 HH:MM:SS, 不足 1 小时只显示 MM:SS"""
     if seconds <= 0:
         return "00:00"
     h, r = divmod(int(seconds), 3600)
@@ -11,7 +11,7 @@ def format_duration(seconds: int) -> str:
 
 
 def format_file_size(size_bytes: int) -> str:
-    """字节数 → B/KB/MB/GB/TB 可读大小"""
+    """字节数转成 B/KB/MB/GB/TB 可读大小"""
     if size_bytes <= 0:
         return "0 B"
     units = ["B", "KB", "MB", "GB", "TB"]
@@ -24,7 +24,7 @@ def format_file_size(size_bytes: int) -> str:
 
 
 def format_resolution(width: int, height: int) -> str:
-    """宽高 → 可读分辨率 (附常见档位标注)"""
+    """宽高转成可读分辨率, 附常见档位标注"""
     if not width or not height:
         return "未知"
     if height >= 2160:

@@ -1,9 +1,7 @@
-"""
-海报 A 方案: 本地抽内嵌封面, 不联网刮削。
+"""海报提取(本地抽内嵌封面, 不联网刮削)的行为锁。
 
-测试**不依赖真的 ffmpeg/ffprobe** —— 子进程调用统一走 `posters._run`,
-monkeypatch 它就能覆盖成功/失败/超时/脏输出各种分支。
-`posters_dir()` 也必须打桩到 tmp_path, 否则测试会往真的 `data/posters/` 里写东西。
+子进程调用统一走 posters._run, 打桩它即可覆盖成功/失败/超时/脏输出;
+posters_dir() 打桩到 tmp_path, 避免测试写进真实的 data/posters/。
 """
 import json
 import subprocess
@@ -23,10 +21,7 @@ from app.utils import path_detector as PD
 
 @pytest.fixture(scope="module", autouse=True)
 def app():
-    """
-    autouse: 造测试图要用 QPixmap, 而 QPixmap 必须有 QGuiApplication 才能用。
-    好几个测试是间接用到它的(通过 _make_jpg), 显式一个个加参数太容易漏。
-    """
+    """autouse: 造测试图的 QPixmap 需要 QGuiApplication 在场, 间接用到的测试太多"""
     a = QApplication.instance() or QApplication([])
     yield a
 
@@ -462,10 +457,7 @@ class TestCardPoster:
         assert card._poster.text() == "空"
 
     def test_vertical_cover_is_center_cropped_not_letterboxed(self, app, tmp_path):
-        """
-        封面是竖版 2:3, 海报区是横的 160x132。
-        KeepAspectRatio 会在左右各留三十多像素黑边, 所以必须 Expanding + 居中裁。
-        """
+        """竖版封面进横向海报区必须 Expanding + 居中裁, 不留左右黑边"""
         jpg = _make_jpg(tmp_path / "v.jpg", 200, 300)
         card = MediaCard({"id": 14, "title": "竖版", "poster": str(jpg)})
         pm = card._poster.pixmap()
@@ -473,15 +465,10 @@ class TestCardPoster:
 
 
 # ==========================================================================
-# DetailPage 显示海报 (用户报: "影视库海报有了, 进详情页却没有海报")
+# DetailPage 显示海报
 # ==========================================================================
 class TestDetailPagePoster:
-    """
-    `_load()` 一直把 `Media.poster_path` 物化成 `media["poster"]`, 但 `_show_info`
-    从来没用过它 —— 永远渲染首字母占位, 于是卡片有图、详情页没图。
-    这里走真实 seam: init_database → `DetailPage(media_id)` 构造即加载,
-    和 `MainWindow._open_detail` 是同一条链, 不直接调 `_show_info` 喂假 dict。
-    """
+    """走真实 seam: init_database → DetailPage(media_id) 构造即加载, 与主窗口同一条链"""
     # 详情页海报区实测尺寸 (_show_info 里 setFixedSize(200, 280))
     W, H = 200, 280
 
@@ -620,7 +607,7 @@ class TestDetectFfmpeg:
         assert PD.detect_ffmpeg(str(exe)) == str(exe)
 
     def test_falls_back_to_ffprobe_sibling(self, tmp_path, monkeypatch):
-        """本机就是这种情况: WinGet 的 ffmpeg-full 里两个 exe 放一起, 但 PATH 里不一定有"""
+        """ffprobe 同目录下的 ffmpeg.exe 也要能找到 (PATH 里不一定有)"""
         probe = tmp_path / "ffprobe.exe"
         probe.write_bytes(b"x")
         sib = tmp_path / "ffmpeg.exe"
@@ -636,7 +623,7 @@ class TestDetectFfmpeg:
 
 
 # ==========================================================================
-# 自动截帧兜底 —— 真库 15 部里只有 2 部有内嵌封面, 靠这个把覆盖率补上去
+# 自动截帧兜底
 # ==========================================================================
 def _make_solid(path, color, fmt="PNG", w=64, h=64):
     """造一张纯色图。亮度测试用 PNG: JPEG 有损, 阈值卡不准"""
@@ -699,11 +686,7 @@ class TestClampTimestamps:
                 assert 0 <= ts <= d - P._SAFETY_MARGIN + 1e-6, (d, ts)
 
     def test_very_short_video_stays_inside_the_safe_window(self):
-        """
-        1.5 秒的片子: 三个比例点都还在(0.15/0.45/0.5), 但全被夹进
-        [0, duration - 安全边距] 里, 且严格递增去重。
-        (原先这条断言"应该只剩一个点", 那是我预期写错了 —— 实现本来就没这个约束。)
-        """
+        """再短的片子, 时间点也全被夹进 [0, duration - 安全边距] 且严格递增去重"""
         got = P._clamp_timestamps(1.5)
         assert got, "再短的片子也该至少给一个时间点"
         assert all(0 <= ts <= 1.5 - P._SAFETY_MARGIN + 1e-6 for ts in got), got
@@ -772,7 +755,7 @@ class TestExtractFrame:
 
 
 class TestFrameFallback:
-    """ensure_poster 第 ④ 级: 没有手动图也没有内嵌封面时自动截帧"""
+    """ensure_poster 的最后一档: 没有手动图也没有内嵌封面时自动截帧"""
 
     def _nothing_else(self, monkeypatch):
         monkeypatch.setattr(P, "find_manual_poster", lambda vp: None)

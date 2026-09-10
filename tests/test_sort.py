@@ -1,26 +1,7 @@
 """
-排序逻辑回归锁 (2026-09-10 用户报: "名称排序和时间排序逻辑走一遍修一下")。
-
-真库复现出的三处真 bug (HANDOFF §4.32):
-  1. **年份排序从未生效**: UI 下拉传中文标签"年份", 而 stats.get_library_list
-     只认英文 `sort == "year"` → 永远落进 else 变成名称序 (真库实测: 选"年份"
-     与选"名称"的输出逐行全同)。
-  2. **名称排序是 SQLite BINARY 序**: 英文大小写敏感 (Zebra 排在 apple 前),
-     中文按 Unicode 码点而非拼音 (真库实测: 头→帕→星→杀→泰→海→痴→美→蜘→霍)。
-  3. **并列时顺序未定义**: "最近观看"的 NULL(未观看) 段实际按 rowid 裸奔;
-     年份同值、添加时间同批扫描 (真库 15 部 created_at 只差微秒) 同理 ——
-     数据一动顺序就漂。
-
-修法: stats.py 用 _SORT_MODES 把中英文标签统一映射成四个内部模式;
-名称/年份改成取回全部符合行后用 locale.strxfrm 语言学排序 (系统 locale 为
-中文时 = 拼音序 + 英文大小写不敏感, 零第三方依赖) 再手动分页;
-时间类排序留在 SQL 并补确定性的次级排序键。
-
-⚠️ 语言学断言依赖系统 locale: 先探针再决定 skip (NOCASE_OK / PINYIN_OK),
-   别让这套测试在非中文系统上假红。
-⚠️ UI 断言必须走真实 seam (下拉框 setCurrentIndex → currentTextChanged →
-   _on_sort → refresh → 卡片重排), 直接调 get_library_list 会绕过
-   "UI 传的是中文标签" 这个 bug 前提 —— §4.21 假绿教训。
+排序逻辑回归锁: 中英文排序标签统一映射、名称/年份的语言学排序 (拼音序、
+大小写不敏感)、时间类排序的确定性次级键, 以及下拉框到卡片重排的 UI seam。
+语言学断言依赖系统 locale, 先探针再决定 skip (NOCASE_OK / PINYIN_OK)。
 """
 import locale
 from datetime import datetime, timedelta
@@ -57,7 +38,7 @@ _SEED = [
     (6, "帕丁顿1",      None, 60, None),    # 年份没解析出来
     (7, "头号玩家",      2018, 70, None),
     (8, "时间并列A",     2017, 80, None),    # 与 id9 添加时间完全相同
-    (9, "时间并列B",     2017, 80, None),    # (复刻真库"一批扫进来"的场景)
+    (9, "时间并列B",     2017, 80, None),
 ]
 
 # 名称: 英文大小写不敏感 A-Z, 中文按拼音 (chi<hai<pa<shi<tou)
@@ -115,7 +96,7 @@ def _titles(result):
 class TestSortDataLayer:
 
     def test_ui_label_year_is_recognized(self, seeded):
-        """bug 本体: UI 下拉传的就是中文"年份", 服务层必须认 (旧代码只认 "year")"""
+        """UI 下拉传的是中文"年份", 服务层必须识别"""
         got = _titles(seeded.get_library_list(sort="年份"))
         assert got == WANT_YEAR, (
             f"选『年份』没有按年份排 (旧 bug: 静默退回名称序)\n实得: {got}\n期望: {WANT_YEAR}")
@@ -169,7 +150,7 @@ class TestSortDataLayer:
             "未知排序键该退回名称序而不是崩"
 
     def test_title_pagination_slices_the_sorted_list(self, seeded):
-        """名称序改成 Python 排序后, offset/limit 必须切的是**排好序**的列表"""
+        """offset/limit 切的是排好序之后的列表"""
         full = _titles(seeded.get_library_list(sort="名称"))
         p1 = _titles(seeded.get_library_list(sort="名称", limit=3))
         p2 = _titles(seeded.get_library_list(sort="名称", limit=3, offset=3))
@@ -202,7 +183,7 @@ class TestSortUiSeam:
         return [c.findChild(QLabel, "cardTitle").text() for c in page._cards]
 
     def test_combo_year_reorders_cards(self, page, app):
-        """用户真实动作: 下拉切到『年份』→ 卡片必须重排成年份序"""
+        """下拉切到『年份』后卡片必须重排成年份序"""
         assert self._card_titles(page) != WANT_YEAR, "初始就该是名称序, 不是年份序"
         page._sort.setCurrentIndex(1)          # ["名称","年份",...] → 年份
         app.processEvents()
@@ -210,7 +191,7 @@ class TestSortUiSeam:
         assert got == WANT_YEAR, f"下拉切『年份』后卡片没重排对\n实得: {got}\n期望: {WANT_YEAR}"
 
     def test_recent_view_hides_the_combo(self, app, seeded):
-        """recent 视图排序写死"最近观看", 下拉是死的 → 该藏掉, 别留能点但没用的控件"""
+        """recent 视图排序固定, 下拉框应隐藏"""
         p = LibraryPage(view="recent", stats_service=seeded)
         p.setAttribute(Qt.WA_DontShowOnScreen, True)
         p.show()

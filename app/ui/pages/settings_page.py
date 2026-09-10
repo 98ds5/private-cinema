@@ -166,7 +166,7 @@ class SettingsPage(QWidget):
         self._scan_status.setObjectName("settingValue")
         layout.addWidget(self._scan_status)
 
-        # ---- 海报提取 (A 方案: 抽视频内嵌封面, 不联网刮削) ----
+        # ---- 海报提取 (抽视频内嵌封面, 不联网) ----
         self._poster_btn = QPushButton("提取内嵌封面")
         self._poster_btn.setObjectName("themeToggle")
         self._poster_btn.setToolTip(
@@ -194,9 +194,7 @@ class SettingsPage(QWidget):
         self.config.setdefault("player", {})["engine"] = engine
         save_config(self.config)
 
-        # 立即切换运行中的引擎。
-        # 原先只写配置文件, 必须重启 app 才生效 —— 用户从 VividPlayer 切到
-        # MPV 想测进度保存时, 会以为设置项是坏的。
+        # 同时立即切换运行中的引擎, 不必重启
         if self.player_service is None:
             self._scan_status.setText(f"引擎已保存为 {engine} (未接入播放服务)")
             return
@@ -350,14 +348,14 @@ class SettingsPage(QWidget):
         self._scan_btn.setText("开始扫描")
 
     # ------------------------------------------------------------------
-    # 海报提取 (A 方案: 本地内嵌封面, 不联网)
+    # 海报提取 (本地内嵌封面, 不联网)
     # ------------------------------------------------------------------
     def _start_posters(self):
         """抽内嵌封面。必须放线程里: 十几个 ffmpeg 子进程会把 UI 卡死。"""
         if self._poster_worker is not None and self._poster_worker.isRunning():
             return
 
-        # 只读配置, 不往里写 —— 那是用户数据
+        # 只读配置, 不往里写
         ffmpeg_path = detect_ffmpeg(
             self.config.get("ffmpeg", {}).get("ffmpeg_path"))
         if not ffmpeg_path:

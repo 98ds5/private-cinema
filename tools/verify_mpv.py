@@ -1,15 +1,5 @@
-"""[verify] 真 mpv 端到端验证 (非 fake, 走完整生产代码路径)。
-
-验证目标:
-  1. 真 mpv 进程 + 真命名管道能连上 (重试逻辑)
-  2. time-pos / duration 能从混着异步事件的真实字节流里解析出来
-  3. 进度经 queued signal 回主线程并落库
-  4. 动漫分支: episodes 表写入 + media 表聚合回写 (HANDOFF §4.3/4.4)
-  5. 续播: start_pos 传进去后 mpv 真的从那个位置开始
-  6. stop() 能优雅关掉 mpv 窗口
-
-刻意选动漫单集而不是电影: 一次覆盖两条进度写入路径。
-测试完把数据库恢复成原样, 不在用户的库里留残渣。
+"""[verify] 真 mpv 端到端验证: 管道连接、进度解析、落库、续播定位、退出发 finished。
+选动漫单集一次覆盖 episodes/media 两条进度写入路径; 测前快照数据库, 测后恢复。
 """
 import sys
 import time
@@ -22,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.database import get_session, init_database
 from app.models.tables import Episode, Media, MediaFile
 from app.services.player import _MpvEngine
-from app.utils.config_utils import load_config     # 绝不传 {} (HANDOFF §4.1)
+from app.utils.config_utils import load_config     # 必须真实加载, 传空 dict 会缺键
 from app.utils.path_detector import detect_mpv
 
 TAG = "[verify]"
@@ -116,9 +106,7 @@ def main():
     log("stop() 后落库:", after1)
 
     ok1 = bool(seen) and seen[-1][1] > 0 and seen[-1][0] > 0
-    # 关键: start_pos=0 时首个 time-pos 必须接近 0。
-    # 修复前这里是 625 —— mpv 用自己 portable_config 里的
-    # save-position-on-quit 缓存偷偷续播了, 我们的库不是唯一事实来源。
+    # start_pos=0 时首个 time-pos 必须接近 0: mpv 的 save-position-on-quit 缓存可能偷偷续播。
     ok0 = bool(seen) and seen[0][0] < 30
     ok2 = (after1["ep_pos"] or 0) > 0 and (after1["media_pos"] or 0) > 0
     ok3 = after1["ep_status"] in ("watching", "watched")
@@ -163,8 +151,7 @@ def main():
     ok6 = fin3 == [media_id]
     log(f"[6] 进程退出发 finished: {'PASS' if ok6 else 'FAIL'} (收到 {fin3})")
     after3 = snapshot(media_id, ep_id)
-    # 第 3 轮 start_pos=0 且只播了约 6 秒, 落库进度必须是个小数字。
-    # 修复前这里是 646 (mpv 从自己的缓存续播), 一眼就能看出不是我们在控制。
+    # start_pos=0 且只播了几秒, 落库进度必须是小数字, 以此排除 mpv 自行从缓存续播。
     ok7 = 0 < (after3["ep_pos"] or 0) < 60
     log(f"[7] 退出时进度已落盘   : {'PASS' if ok7 else 'FAIL'} "
         f"({after3['ep_pos']}, 期望 0<x<60)")

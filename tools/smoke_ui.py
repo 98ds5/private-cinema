@@ -1,13 +1,5 @@
-"""[smoke] 离屏冒烟: 确认主窗口装配、引擎热切换、详情页小窗布局都没坏。
-
-按 HANDOFF §7 的方法论: 模型看不到图, 一律运行时内省。
-- WA_DontShowOnScreen 避免在用户屏幕上闪窗口
-- 必须 load_config(), 绝不 MainWindow({}, ...) (HANDOFF §4.1 事故)
-
-⚠️ 2026-09-09 教训: 本脚本上一版在"引擎热切换"两项上报了 PASS, 而用户手点时
-   切换是**完全失效**的。原因是我直接调 ps.set_engine(), 绕过了设置页
-   「先写 config 再调 set_engine」的真实顺序。seam 不对的测试就是假绿。
-   现在改成走 SettingsPage 的下拉框。
+"""[smoke] 离屏冒烟: 主窗口装配、引擎热切换、详情页小窗布局。
+配置必须 load_config(); 引擎切换走 SettingsPage 下拉框, 与 UI 真实调用顺序一致。
 """
 import sys
 from pathlib import Path
@@ -34,17 +26,8 @@ TAG = "[smoke]"
 
 
 class _NoModal:
-    """
-    顶掉 main_window 模块里的 QMessageBox。
-
-    ⚠️ 离屏脚本绝不能弹模态框: QMessageBox.warning 内部是 exec(), 会**永久阻塞**
-    事件循环, 脚本挂死 (2026-09-09 实际发生过: pwsh 300s 超时), 而且在用户屏幕上
-    弹出真窗口。触发路径是 set_engine("非法值") → playback_error →
-    main_window._on_playback_error → QMessageBox.warning。
-
-    生产代码弹这个框是对的(HANDOFF: 播放失败绝不静默), 要改的是诊断工具。
-    只替换 main_window 模块内的那个名字, 不动全局 PySide6。
-    """
+    """替换 main_window 模块引用的 QMessageBox: 模态框内部 exec(), 离屏脚本弹出会永久阻塞事件循环。
+    只换该模块内的名字, 不动全局 PySide6。"""
     calls = []
 
     @staticmethod
@@ -69,13 +52,11 @@ def log(*a):
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
-    mw_mod.QMessageBox = _NoModal      # 必须在建 MainWindow 之前顶掉, 见 _NoModal 文档
+    mw_mod.QMessageBox = _NoModal      # 必须在建 MainWindow 之前顶掉
     cfg = load_config()
     log("config keys:", sorted(cfg.keys()))
 
-    # 冒烟要验的是 MPV 引擎的装配, 但用户可能已把 config 切到 vividplayer
-    # (2026-09-09 就撞上了: _VividPlayerEngine 没有 interval 属性 → AttributeError)。
-    # 只在内存里改, 不落盘: save_config 后面会被打桩。
+    # 冒烟只验 MPV 引擎装配, config 可能已指向其他引擎; 只在内存里改, save_config 后面被打桩, 不落盘。
     log(f"config 里的 engine = {cfg.get('player', {}).get('engine')} → 冒烟强制用 mpv")
     cfg.setdefault("player", {})["engine"] = "mpv"
 
@@ -103,8 +84,7 @@ def main():
     ok.append(("页面数 = 6", w.pages.count() == 6))
     log("devicePixelRatioF =", w.devicePixelRatioF(), " geometry =", w.geometry())
 
-    # 不用 receivers(): HANDOFF §7 记过, PySide6 的 QObject.receivers()
-    # 不接受 SignalInstance。改成行为验证 —— 直接发信号看主线程槽有没有跑。
+    # PySide6 的 QObject.receivers() 不接受 SignalInstance, 改用行为验证: 直接发信号看主线程槽有没有跑。
     eng = ps._engine
     eng._playing = True
     eng._media_id = None          # _save_progress 对 None 直接 return, 不会脏库
@@ -124,7 +104,7 @@ def main():
     ok.append(("停止态下 _ipc_failed/_process_exited 安全 no-op",
                eng.is_playing is False))
 
-    # 热切换 (HANDOFF §4.10) —— 必须走 SettingsPage 的真实 seam, 见文件头教训
+    # 热切换: 走 SettingsPage 下拉框, 与 UI 真实调用路径一致 (先写 config 再调 set_engine)。
     real_cfg = w.config
     saved = []
     settings_mod.save_config = lambda c: saved.append(     # 打桩: 不写真实 config.json
@@ -149,8 +129,7 @@ def main():
         app.processEvents()
     ok.append(("切回原引擎", ps.engine_type == start_engine))
 
-    # 非法引擎: 必须被拒, 而且必须**发信号**而不是静默 —— 但那个信号在
-    # MainWindow 里接的是模态框, 所以本脚本开头已经把 mw_mod.QMessageBox 顶掉了。
+    # 非法引擎: 必须被拒且发出报错信号而不是静默; QMessageBox 已被替换, 不会弹模态框卡死脚本。
     _NoModal.calls.clear()
     ok.append(("非法引擎被拒", ps.set_engine("vlc") is False))
     ok.append(("非法引擎会报错而不是静默 (且没弹模态框卡死脚本)",
@@ -172,10 +151,7 @@ def main():
     nav = w.findChildren(QWidget)
     log("顶层子 widget 数:", len(nav))
 
-    # 详情页在小窗口下不能被压扁。
-    # 2026-09-09 用户手点报的「没有选集」「播放键不对」「全屏正常小窗口有问题」
-    # 是同一个根因: 本页原先没有 QScrollArea, minimumSizeHint 1002x996 而小窗只给
-    # 798x524, Qt 硬压之下 10 个选集行按钮全部塌成高度 0。
+    # 详情页必须带滚动区: 窗口尺寸低于页面 minimumSizeHint 时, 选集行按钮会被 Qt 压成 0 高度。
     with get_session() as s:
         a = s.query(Media).filter(Media.media_type == "anime").first()
         anime_id = a.id if a else None

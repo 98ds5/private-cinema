@@ -1,13 +1,6 @@
 """
-外部工具路径检测 (ffprobe / mpv)
-
-检测顺序:
-  1. 用户在设置页手动指定的自定义路径
-  2. 系统 PATH 中的同名命令
-  3. 程序同目录下的可执行文件
-  4. 常见安装位置
-
-返回 None 表示没找到 — UI 应提示用户手动指定或安装。
+外部工具路径检测 (ffprobe / mpv)。
+检测顺序: 设置页手动指定、系统 PATH、程序同目录、常见安装位置; 找不到返回 None。
 """
 import shutil
 import platform
@@ -23,10 +16,7 @@ def detect_ffprobe(custom: Optional[str] = None) -> Optional[str]:
 def detect_ffmpeg(custom: Optional[str] = None) -> Optional[str]:
     """
     ffmpeg 可执行文件 (抽内嵌封面用)。
-
-    ffprobe 找到了但 ffmpeg 不在 PATH 上时, 去它**同目录**再找一次 ——
-    官方构建 (含本机那个 WinGet 的 ffmpeg-full) 两个 exe 是放在一起的,
-    而用户往往只把其中一个的目录加进了 PATH。
+    ffprobe 找到但 ffmpeg 不在 PATH 上时, 去它同目录再找一次: 官方构建里两个 exe 放一起。
     """
     found = _detect("ffmpeg", custom)
     if found:
@@ -61,14 +51,14 @@ def _detect(tool: str, custom: Optional[str] = None) -> Optional[str]:
     if local.is_file():
         return str(local.resolve())
 
-    # 4. 常见安装位置 + 本机已知路径
+    # 4. 常见安装位置
     system = platform.system()
     exe = f"{tool}{suffix}"
     if system == "Windows":
         candidates = [
             f"C:\\Program Files\\{tool}\\bin\\{exe}",
             f"C:\\Program Files (x86)\\{tool}\\bin\\{exe}",
-            # mpv-lazy (本机)
+            # mpv 懒人包解压目录
             f"D:\\Movie\\mpv\\mpv-lazy\\{exe}",
         ]
     elif system == "Darwin":

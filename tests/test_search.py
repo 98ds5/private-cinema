@@ -1,17 +1,7 @@
 """
-全局搜索回归锁。
-
-用户报"搜索框不能用"。取证结果: 页面上有**两个**搜索框, 而用户先看到、先去点的
-那个恰好是死的 ——
-  - `main_window.py` 顶部那个原先是**局部变量** `search`: 没存属性、没连信号、
-    没有 handler, 却在每个页面都显示。
-  - `library_page.py` 内部那个是**接好的**, 但位置靠右、placeholder 只写"搜索...",
-    而且和顶部那个同时出现在库页面上。
-
-修法: 顶部做成全站唯一入口(输入即过滤 + 回车跳全库), 页面内那个删掉。
-
-⚠️ 这里的测试必须真的往 QLineEdit 里打字并等防抖定时器, 不能直接调 refresh()
-   —— 上一轮就是栽在"绕过调用方真实顺序"上 (HANDOFF §9)。
+全局搜索回归锁: 顶部搜索框全站唯一且真实接线、输入即过滤、
+回车跳「全部影视」再过滤、关键词跨页面保持。
+测试必须真的往 QLineEdit 打字并等防抖定时器, 不直接调 refresh()。
 """
 import time
 
@@ -46,7 +36,7 @@ def _pump(app, pred, timeout=4.0):
 @pytest.fixture
 def win(app, tmp_path):
     """真 MainWindow + 一个临时库 (3 部片子, 标题互不包含)"""
-    cfg = load_config()                      # 绝不传 {} (HANDOFF §4.1)
+    cfg = load_config()                      # 必须用真实配置, 不能传 {}
     cfg["system"]["db_path"] = str(tmp_path / "cinema.db")
     init_database(cfg["system"]["db_path"])
 
@@ -77,12 +67,8 @@ def _cards(w):
 
 def _type(w, app, text):
     """
-    往顶部搜索框打字, 并**确定性地**等防抖定时器到期。
-
-    ⚠️ 光调 processEvents() 不够: 紧循环里只过去几微秒, 10ms 的 single-shot
-    定时器根本还没到期, 于是"过滤有没有生效"全看运气 —— 这套测试最初就 flaky
-    在这里 (靠防抖的 4 条里 2 条过 2 条挂, 而直接调 _apply_search() 的回车那条稳过)。
-    判据用 QTimer.isActive(): 定时器 fire 之后它就变 False。
+    往顶部搜索框打字, 并确定性地等防抖定时器到期。
+    紧循环 processEvents 时间没真正流逝, 判据用 QTimer.isActive(): fire 后变 False。
     """
     w._search.setText(text)
     budget = w._search_debounce.interval() / 1000.0 + 2.0
@@ -99,7 +85,7 @@ def _type(w, app, text):
 class TestGlobalSearch:
 
     def test_there_is_exactly_one_search_box(self, win):
-        """全站只能有一个搜索框, 否则用户总会先点到不工作的那个"""
+        """全站只能有一个搜索框"""
         boxes = win.findChildren(QLineEdit)
         assert len(boxes) == 1, f"窗口里有 {len(boxes)} 个 QLineEdit"
         assert boxes[0] is win._search
@@ -110,7 +96,7 @@ class TestGlobalSearch:
                     "库页面里又出现了自己的搜索框"
 
     def test_top_search_box_is_actually_wired(self, win, app):
-        """顶部框打字必须真的过滤 —— 这条就是原先坏掉的行为"""
+        """顶部框打字必须真的过滤"""
         win._nav.setCurrentRow(NAV_ALL_ROW)
         _pump(app, lambda: _cards(win) == 3)
         assert _cards(win) == 3, "进「全部影视」应看到 3 张卡片"

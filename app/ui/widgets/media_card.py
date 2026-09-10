@@ -17,9 +17,9 @@ class MediaCard(QFrame):
 
     clicked = Signal(int)  # media_id
 
-    # 卡片是固定尺寸, 加了一行角标就要从海报区借高度, 否则三个 QLabel 会被压扁
+    # 加了一行角标就从海报区借高度, 否则三个 QLabel 会被压扁
     POSTER_H = 132
-    # 尺寸提成类常量: LibraryPage 要靠它算"一行能放几列", 别再各写各的魔数
+    # LibraryPage 按 CARD_W 算一行放几列
     CARD_W = 160
     CARD_H = 200
 
@@ -44,23 +44,13 @@ class MediaCard(QFrame):
         self._apply_poster(media)
 
         # 画质角标 (4K / HDR10 / DV / 中字)
-        # 原先卡片上完全看不出画质, 网格里分不清哪部是 4K Dolby Vision、
-        # 哪部是 1080p SDR —— 数据其实 25/25 全在库里, 只是没往上传。
         badges = badges_from_media(media) if media else []
         self._badges = QLabel("  ".join(badges))
         self._badges.setObjectName("cardBadges")
         self._badges.setFixedHeight(18)
         self._badges.setAlignment(Qt.AlignCenter)
         self._badges.setToolTip(" · ".join(badges) if badges else "无画质元数据")
-        # 没数据就整行藏掉, 别留一条空白占位。
-        # ⚠️ 这里只能用 hide(), **绝不能写 setVisible(bool(badges))**:
-        # setVisible(True) 作用在一个还没有父级的 widget 上, 会把它变成
-        # **顶层窗口并立刻显示**, 而下一行 addWidget 才把它塞回卡片 → 每张卡片
-        # 构造时都会在自己位置上闪出一个 15~94 x 18 的无字小窗再消失
-        # (脱离 MainWindow 子树, QSS 不生效, 所以看着是空白的)。
-        # 15 张卡 × 每次 refresh(切页 / 搜索防抖到期) = 用户看到的
-        # "一串小窗口闪过去, 会自己关"。只有 LibraryPage 建卡片, 所以首页和设置不闪。
-        # 有角标时什么都不用做: 加进布局后自然会跟着卡片显示。
+        # 没数据就整行藏掉。只能 hide(): 拿到父级前 setVisible(True) 会闪成顶层小窗
         if not badges:
             self._badges.hide()
         layout.addWidget(self._badges)
@@ -85,19 +75,14 @@ class MediaCard(QFrame):
         self._media_id = media.get("id")
 
     def _apply_poster(self, media: dict):
-        """
-        有海报文件就显示图, 没有 (或解码失败) 就保持首字母占位。
-
-        封面几乎都是竖版 2:3, 而海报区是横的 160x132。直接 KeepAspectRatio 会在
-        左右各留三十多像素的黑边, 很难看; 所以用 KeepAspectRatioByExpanding 填满,
-        再居中裁一刀。IgnoreAspectRatio 会把人脸拉扁, 更不行。
-        """
+        """有海报显示图, 否则保持首字母占位。
+        竖版封面填满横向海报区: KeepAspectRatioByExpanding + 居中裁切"""
         src = (media or {}).get("poster")
         if not src or not os.path.isfile(src):
             return
         pm = QPixmap(src)
         if pm.isNull():
-            return                        # 文件在但解不出来 → 继续用占位, 别留一块空白
+            return                        # 解不出来: 继续用占位
         pm = pm.scaled(self.CARD_W, self.POSTER_H,
                        Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         x = max(0, (pm.width() - self.CARD_W) // 2)

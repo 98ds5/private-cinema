@@ -1,9 +1,5 @@
 """
 主窗口 — 无边框 + 交通灯右上角 + 双版本双主题
-
-标题栏:
-  "私人影院" （居中）    [Echo/Prism] [☀/🌙]  ● ● ●
-                                             关 缩 放
 """
 import ctypes
 import os
@@ -99,9 +95,7 @@ class MainWindow(QMainWindow):
         self.player_service = PlayerService(config, mpv_path, self)
         self.stats_service = StatsService()
 
-        # 播放错误必须在界面上可见。
-        # 原先 playback_error 全项目无人接收, 引擎启动失败时完全静默,
-        # 用户看到的就是"点了播放没反应", 排查时也没有任何线索。
+        # 播放错误必须在界面上可见, 不能静默
         self.player_service.playback_error.connect(self._on_playback_error)
 
         # 「正在播放」状态条: 仅 MPV 模式有真实数据可填
@@ -194,11 +188,7 @@ class MainWindow(QMainWindow):
         hh = QHBoxLayout(header)
         hh.setContentsMargins(16, 0, 16, 0)
 
-        # 顶部全局搜索框 —— 全站唯一的搜索入口。
-        # 原先这里是局部变量 `search`: 没存成属性、没连任何信号、没有 handler,
-        # 是一个永远不起作用却在每个页面都显示的输入框 (用户报"搜索框不能用")。
-        # 同时 LibraryPage 内部还有一个接好的搜索框, 于是库页面上会出现两个。
-        # 现在: 输入即过滤当前库页; 不在库页面时回车跳到「全部影视」再过滤。
+        # 顶部全局搜索框: 输入即过滤当前库页, 不在库页时回车跳「全部影视」再过滤
         self._search = QLineEdit()
         self._search.setObjectName("searchBox")
         self._search.setPlaceholderText("搜索影视名称...（回车在全库中搜索）")
@@ -209,7 +199,7 @@ class MainWindow(QMainWindow):
         hh.addStretch()
         main_layout.addWidget(header)
 
-        # 防抖: textChanged 每个字符都触发, 直接查库 + 重建全部卡片会随片源增多越来越卡
+        # 防抖: textChanged 逐字符触发, 直接查库重建卡片会越来越卡
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
         self._search_debounce.setInterval(200)
@@ -221,8 +211,7 @@ class MainWindow(QMainWindow):
         b_layout.setContentsMargins(0, 0, 0, 0)
         b_layout.setSpacing(0)
 
-        # 存成属性: 顶部搜索框回车时要能跳到「全部影视」。
-        # 原先 nav 是局部变量, 出了这个函数就再也拿不到侧边栏。
+        # 存成属性: 顶部搜索框回车时要能跳到「全部影视」
         self._nav = QListWidget()
         self._nav.setObjectName("sidebar")
         for label in NAV_ITEMS:
@@ -278,13 +267,8 @@ class MainWindow(QMainWindow):
 
     # ---- 最近观看: 续播 / 进详情页 ----
     def _on_resume_requested(self, item: dict):
-        """
-        首页「最近观看」点一行 → 从上次的进度直接续播。
-
-        episode_id 必须一起传: 动漫的进度写在 episodes 表, 不传的话
-        _save_progress 会把这一集的进度写到 media 表上, 看完动漫也永远
-        不进"已观看"统计 (详见 player._save_progress 的分支)。
-        """
+        """首页「最近观看」→ 从上次进度续播。
+        episode_id 必须一起传: 动漫进度按集写在 episodes 表, 漏传会记错位置"""
         path = item.get("file_path") or ""
         if not path or not os.path.exists(path):
             QMessageBox.warning(
@@ -301,13 +285,7 @@ class MainWindow(QMainWindow):
         )
 
     def _open_detail(self, media_id: int):
-        """
-        打开某部作品的详情页, 并销毁上一个。
-
-        原先 LibraryPage._on_card_clicked 每次点击都 pages.addWidget(DetailPage(...)),
-        旧页面既不隐藏也不销毁, 一直挂在 QStackedWidget 里 —— 点几十次就攒几十个
-        孤儿页, 内存只增不减。收拢到这里统一复用。
-        """
+        """打开详情页并销毁上一个, 避免旧页在栈里堆积"""
         old = getattr(self, "_detail_page", None)
         page = DetailPage(media_id, stats_service=self.stats_service)
         self._detail_page = page
@@ -319,17 +297,11 @@ class MainWindow(QMainWindow):
 
     # ---- 页面切换 ----
     def _on_page_changed(self, idx: int):
-        """
-        页面切换时刷新目标页面数据。
-
-        用通用的 refresh() 探测而不是只刷新首页:
-        LibraryPage 原先只在构造后 100ms 刷新一次, 那时数据库还是空的,
-        扫描完成后再切过去也不会重查 → 影视库永远显示 0 张卡片。
-        """
+        """页面切换时刷新目标页面。
+        用通用 refresh() 探测: 只在构造时刷新会错过扫描完成后的数据"""
         self.pages.setCurrentIndex(idx)
         page = self.pages.widget(idx)
-        # 搜索框是全站的, 切页要把当前关键词带过去。
-        # refresh=False: 紧接着下面会统一刷一次, 别把同一份数据查两遍。
+        # 切页带上当前关键词; refresh=False: 下面统一刷, 别查两遍
         if isinstance(page, LibraryPage):
             page.set_search(self._search.text(), refresh=False)
         refresh = getattr(page, "refresh", None)
@@ -338,16 +310,12 @@ class MainWindow(QMainWindow):
 
     # ---- 播放错误 ----
     def _on_playback_error(self, message: str):
-        """播放失败 → 弹窗告知, 绝不静默"""
+        """播放失败 → 弹窗告知"""
         QMessageBox.warning(self, "播放失败", str(message))
 
     # ---- 正在播放状态条 ----
     def _on_playback_started(self, media_id: int):
-        """
-        仅 MPV 模式显示状态条。
-        VividPlayer 是纯协议拉起、无 IPC, 拿不到位置也停不下来,
-        显示"正在播放"是无法验证的假信息, 所以不显示。
-        """
+        """仅 MPV 模式显示状态条: VividPlayer 无 IPC, 进度不可知"""
         bar = getattr(self, "_now_bar", None)
         if bar is None or self.player_service.engine_type != "mpv":
             return
@@ -407,8 +375,7 @@ class MainWindow(QMainWindow):
         return super().nativeEvent(eventType, message)
 
     def _hit_test(self, x: int, y: int) -> int:
-        # lParam 是物理像素，缩放>100%时与 Qt 逻辑坐标不一致，
-        # 统一用 QCursor.pos()（逻辑坐标）计算，避免整窗被误判成边缘。
+        # lParam 是物理像素, 缩放>100% 时与 Qt 逻辑坐标不一致 → 统一用 QCursor.pos()
         pt = self.mapFromGlobal(QCursor.pos())
         m = 5
         r = self.rect()

@@ -1,21 +1,12 @@
 """
-画质 / 音轨 / 字幕元数据的纯格式化函数。
-
-数据来源是 **ffprobe 直接读本地文件容器**, 不是刮削: 实测 25/25 个文件全都拿到了
-width / height / frame_rate / video_codec / hdr_type / audio_codec /
-audio_tracks(JSON) / subtitle_tracks(JSON) / container_format。
-
-UI 原先只渲染了其中一小部分, 而且 `hdr_type == "SDR"` 时被**刻意隐藏**
-(detail_page 里 `if hdr_type not in (None, "", "SDR")`), 音轨和字幕轨一条都没显示。
-用户因此报"视频画质信息不够明确, 比如 hdr 什么的"。
-
-全部是纯函数: 不碰数据库、不碰 Qt, 方便直接拿库里的真实取值单测。
+画质 / 音轨 / 字幕的纯格式化函数。
+数据来自 ffprobe 解析出的容器元信息 (存在 MediaFile 上), 不是刮削。
+全部是纯函数: 不碰数据库、不碰 Qt。
 """
 import json
 from typing import Optional
 
-# 分辨率按**高度**判定: 宽度会因宽高比不同而不可靠
-# (库里就有 3840x1608 / 3840x1600 这种变形宽银幕, 按宽度算会误判)
+# 分辨率档位表 (按高度取第一个满足的档; 宽银幕特例见 resolution_label)
 _RESOLUTIONS = (
     (4320, "8K"),
     (2160, "4K"),
@@ -26,7 +17,7 @@ _RESOLUTIONS = (
     (480, "480p"),
 )
 
-# HDR 分级, 值越大越好 —— 一部作品有多个文件时用它挑最高的那个
+# HDR 分级, 值越大等级越高; 一部作品多个文件时用它挑最高的那个
 _HDR_RANK = {
     "dolby vision": 5, "dv": 5, "dovi": 5,
     "hdr10+": 4, "hdr10 plus": 4,
@@ -43,11 +34,8 @@ _CHI_LANGS = {
     "chinese", "cmn", "yue", "cant", "cantonese", "tw", "hk", "cn", "sc", "tc",
 }
 
-# 语言码 → 中文短名。
-# ⚠️ ffprobe 给的语言码**不统一**: 同一部片子里能同时出现 ISO 639-2/B (ger fre
-# dut cze rum gre)、639-2/T (deu fra nld ces ron ell) 和 639-1 (de fr nl)。
-# 用户库里就实测到 `DTS(deu)` 和 `AC-3(chi)` —— 只写一套码的话这些会原样漏出去,
-# 显示成 "deu" / "chi" 而不是 "德" / "中"。三套全都收。
+# 语言码转中文短名。ffprobe 的写法不统一, ISO 639-1 / 639-2/T / 639-2/B 三套都收,
+# 否则 deu、chi 这类码会原样漏到界面上。
 _LANG_ZH = {
     # 中文的各种写法
     "chi": "中", "zho": "中", "zh": "中", "cmn": "中", "zh-cn": "中",
@@ -62,7 +50,7 @@ _LANG_ZH = {
     "hin": "印地", "per": "波斯", "arm": "亚美尼亚", "geo": "格鲁吉亚",
     "bur": "缅", "slo": "斯洛伐克", "alb": "阿尔巴尼亚", "baq": "巴斯克",
     "tib": "藏", "wel": "威尔士", "ice": "冰岛", "est": "爱沙尼亚",
-    # 639-2/T (同一语言的另一套码, deu/fra/nld... 原先全漏了)
+    # 639-2/T (同一语言的另一套码)
     "deu": "德", "fra": "法", "nld": "荷", "ces": "捷", "ron": "罗", "ell": "希腊",
     "slk": "斯洛伐克", "sqi": "阿尔巴尼亚", "eus": "巴斯克", "cym": "威尔士",
     "isl": "冰岛", "hye": "亚美尼亚", "kat": "格鲁吉亚", "mya": "缅", "bod": "藏",
@@ -81,10 +69,10 @@ _LANG_ZH = {
     "bn": "孟加拉", "ta": "泰米尔", "te": "泰卢固", "ur": "乌尔都",
 }
 
-# 归一之后算中文的名字 (粤/港/台 也是中文字幕)
+# 归一之后算中文的名字 (粤/港/台 也算中文字幕)
 _CHI_NAMES = {"中", "粤", "港", "台"}
-# 只把这几门语言单独列出来, 其余归到 "+N" —— 一部 REMUX 能有 37 条字幕轨,
-# 全列出来是噪音, 用户真正想知道的是"有没有中文字幕"。
+# 只单独列出中/英/日/韩, 其余归到 "+N": 整盘资源一条能有几十条字幕轨,
+# 全列出来是噪音, 真正有用的信息是"有没有中文字幕"。
 _PREFERRED = ("中", "英", "日", "韩")
 
 
@@ -93,7 +81,7 @@ def canon_lang(code) -> str:
     key = str(code or "").strip().lower()
     return _LANG_ZH.get(key, key)
 
-# 音频编码的展示名 (库里实际出现的是 dts / truehd / eac3)
+# 音频编码的展示名
 _AUDIO_NAME = {
     "dts": "DTS", "dts-hd": "DTS-HD", "dts-hd ma": "DTS-HD MA", "truehd": "TrueHD",
     "eac3": "E-AC-3", "ac3": "AC-3", "aac": "AAC", "flac": "FLAC",
@@ -118,11 +106,9 @@ def _by_height(h: int) -> str:
 
 def resolution_label(width=None, height=None) -> str:
     """
-    分辨率标签。认不出返回空串。
-
-    ⚠️ 必须宽高一起看, 不能只看高度: 库里实际有 3840x1608 / 3840x1600 /
-    3840x1604 三个**变形宽银幕**文件, 它们是 4K 母版裁出来的, 但按高度算
-    会落到 1440 档 → 误报成 "2K"。宽度够 3000 就按 4K 判。
+    分辨率标签, 认不出返回空串。
+    要同时看宽高: 变形宽银幕 (如 3840x1608) 是 4K 母版裁出来的, 只看高度会落到
+    1440 档误报成 "2K", 所以宽度达标时直接按 4K 判。
     """
     try:
         w, h = int(width or 0), int(height or 0)
@@ -147,17 +133,14 @@ def hdr_rank(hdr_type: Optional[str]) -> int:
 
 
 def hdr_label(hdr_type: Optional[str]) -> str:
-    """HDR 等级 → 展示名。**SDR 也要返回 "SDR"** —— 原先 UI 把 SDR 藏起来,
-    用户就分不清"这片子没 HDR"还是"程序没读到"。"""
+    """HDR 等级转展示名。SDR 也返回 "SDR" 而不是空, 好让界面能区分"没 HDR"和"没读到"。"""
     return _HDR_LABEL.get(hdr_rank(hdr_type), "SDR")
 
 
 def best_hdr(hdr_types) -> str:
     """
-    一部作品的多个文件里, 挑 HDR 等级最高的那个, 返回**原始值**。
-
-    数据层不做展示转换: 返回 "Dolby Vision" 而不是 "DV", 标签交给 hdr_label()。
-    否则 StatsService 吐出来的字段里混着 UI 文案, 换个展示风格就得改查询层。
+    一部作品的多个文件里挑 HDR 等级最高的那个, 返回原始值。
+    数据层不做展示转换 (标签交给 hdr_label), 否则统计层的字段里会混进 UI 文案。
     """
     best_raw, best_rank = "", -1
     for h in (hdr_types or []):
@@ -181,10 +164,8 @@ def audio_label(codec: Optional[str]) -> str:
 # 轨道 JSON
 # ----------------------------------------------------------------------
 def parse_tracks(raw) -> list:
-    """
-    audio_tracks / subtitle_tracks 存的是 JSON 字符串。
-    坏数据一律返回 [] —— 这是扫描时写进来的历史数据, 不能因为一条脏 JSON 就崩页面。
-    """
+    """audio_tracks / subtitle_tracks 存的是 JSON 字符串; 坏数据一律返回 [],
+    不能因为一条脏 JSON 就崩页面。"""
     if not raw:
         return []
     if isinstance(raw, list):
@@ -199,15 +180,12 @@ def parse_tracks(raw) -> list:
 
 
 def _track_lang(track: dict) -> str:
-    """轨道语言码 → 归一后的中文短名 (认不出就原样返回小写码)"""
+    """轨道语言码转归一后的中文短名 (认不出就原样返回小写码)"""
     return canon_lang(track.get("lang") or track.get("language"))
 
 
 def has_chinese_subtitle(raw) -> bool:
-    """
-    有没有中文字幕轨 —— 对中文用户这是最要紧的一条信息。
-    chi / zho / zh / zh-Hans / yue / cant 全都算。
-    """
+    """有没有中文字幕轨 (chi/zho/zh/zh-Hans/yue/cant 等写法都算)"""
     for t in parse_tracks(raw):
         code = str(t.get("lang") or t.get("language") or "").strip().lower()
         if canon_lang(code) in _CHI_NAMES or code in _CHI_LANGS:
@@ -217,19 +195,14 @@ def has_chinese_subtitle(raw) -> bool:
 
 def subtitle_summary(raw, brief: bool = False) -> str:
     """
-    字幕概览。
-
-    一部 REMUX 能有 37 条字幕轨, 全列出来是噪音 —— 用户真正想知道的是
-    "**有没有中文字幕**", 所以只单独列出中/英/日/韩, 其余归到 "+N"。
-
-    brief=True 给详情页行内用(要短), False 给 tooltip 用(带轨数)。
+    字幕概览。整盘资源可能有几十条字幕轨, 全列是噪音, 所以只单独列出中/英/日/韩,
+    其余归到 "+N"。brief=True 给详情页行内用 (要短), False 给 tooltip 用 (带轨数)。
     """
     tracks = parse_tracks(raw)
     if not tracks:
         return "无字幕轨"
 
-    # 先归一再比对: 同一门语言在不同压制里可能写成 jpn / ja / jpn,
-    # 直接拿原始码去匹配 "英日中韩" 会漏 (用户库里就实测到 deu 这种 639-2/T 码)
+    # 先归一再比对: 同一门语言在不同压制里写法不一 (jpn / ja), 拿原始码匹配会漏
     names = [_track_lang(t) for t in tracks]
     uniq = list(dict.fromkeys(n for n in names if n))
     chi = any(n in _CHI_NAMES for n in uniq)
@@ -249,10 +222,8 @@ def subtitle_summary(raw, brief: bool = False) -> str:
 
 def audio_summary(raw, brief: bool = False) -> str:
     """
-    音轨概览。库里真实数据是 jpn dts + eng flac, 这种"哪条音轨是什么编码"
-    对挑播放配置很有用, 原先完全没显示。
-
-    brief=True → "DTS/FLAC"(行内); False → "音轨 DTS(日) / FLAC(英)"(tooltip)。
+    音轨概览: brief=True 给行内短标签 (如 "DTS/FLAC"), False 给 tooltip
+    (如 "音轨 DTS(日) / FLAC(英)", 带上语言方便挑播放配置)。
     """
     tracks = parse_tracks(raw)
     if not tracks:
@@ -270,8 +241,7 @@ def audio_summary(raw, brief: bool = False) -> str:
             continue
         lang = _track_lang(t)
         parts.append(f"{codec}({lang})" if lang else codec)
-    # 去重且保序: 用户库里实测有 "DTS(deu) / DTS(deu)" 连着两条、
-    # "AC-3(英) / AC-3(英) / AC-3(英)" 连着三条, 重复占位没有信息量
+    # 去重且保序: 同一语言同一编码常连着好几条, 重复列出没有信息量
     parts = list(dict.fromkeys(parts))
     return "音轨 " + " / ".join(parts) if parts else ""
 
@@ -281,11 +251,9 @@ def audio_summary(raw, brief: bool = False) -> str:
 # ----------------------------------------------------------------------
 def badges_from_media(media: dict) -> list:
     """
-    卡片角标: ["4K", "DV", "中字"]。
-
-    吃的是 `StatsService.get_library_list` 聚合出来的字段
-    (best_height / best_hdr / has_chi_sub) —— 一部作品多个文件时那边已经取了最高档。
-    卡片只有 160px 宽, 所以标签必须短, 且 SDR 不占位(详情页里才显示 SDR)。
+    卡片角标, 如 ["4K", "DV", "中字"]。
+    吃 StatsService.get_library_list 聚合出的字段 (best_width/best_height/best_hdr/
+    has_chi_sub), 多文件时那边已取最高档。卡片窄, 标签要短, 且 SDR 不上角标。
     """
     badges = []
     res = resolution_label(media.get("best_width"), media.get("best_height"))
@@ -301,10 +269,9 @@ def badges_from_media(media: dict) -> list:
 
 def format_tech_line(f: dict) -> str:
     """
-    详情页每个文件的**行内**技术信息 (要短, 完整信息见 tech_tooltip)。
-
-    f 需要包含: width/height/frame_rate/video_codec/hdr_type/duration/file_size/
-                audio_tracks/subtitle_tracks —— 缺哪个就跳过哪个, 不会 KeyError。
+    详情页每个文件的行内技术信息 (要短, 完整信息见 tech_tooltip)。
+    f 含 width/height/frame_rate/video_codec/hdr_type/duration/file_size/
+    audio_tracks/subtitle_tracks, 缺哪个跳过哪个。
     """
     parts = []
 
@@ -316,9 +283,7 @@ def format_tech_line(f: dict) -> str:
         parts.append(res)
     if f.get("video_codec"):
         parts.append(video_label(f["video_codec"]))
-    # HDR 一律显示, 包括 SDR —— 用户要的就是"能不能看出这片子是不是 HDR"。
-    # 原先 detail_page 里写的是 `if hdr_type not in (None, "", "SDR")`, SDR 被藏掉,
-    # 于是分不清"这片子没 HDR"还是"程序没读到"。
+    # HDR 一律显示, 含 SDR: 把 SDR 藏起来就分不清"这片子没 HDR"和"程序没读到"
     parts.append(hdr_label(f.get("hdr_type")))
 
     fps = f.get("frame_rate")
@@ -382,7 +347,7 @@ def tech_tooltip(f: dict) -> str:
 
 
 # ----------------------------------------------------------------------
-# 单位格式化 (与 detail_page 里原有的保持一致, 集中到这里避免两份实现漂移)
+# 单位格式化
 # ----------------------------------------------------------------------
 def fmt_dur(seconds) -> str:
     seconds = int(seconds or 0)

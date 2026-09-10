@@ -1,14 +1,7 @@
 """
-画质 / 音轨 / 字幕格式化的回归锁。
-
-**所有取值都来自用户库里 ffprobe 真实抓到的数据**, 不是我编的理想样本 ——
-这个项目的教训反复是同一条: 用理想样本测, 真机就翻车。
-
-用户报"视频画质信息不够明确, 比如 hdr 什么的"。取证结果: 数据 25/25 全都在库里
-(hdr_type 实测有 SDR / HDR10 / Dolby Vision 三种, frame_rate 23.976,
-audio_codec dts/truehd/eac3, 字幕轨最多 37 条含 chi), 纯粹是 UI 没显示:
-detail_page 只渲染 宽x高/编码/HDR/时长/体积, 而且 **hdr_type == "SDR" 被刻意隐藏**,
-帧率、音轨、字幕轨一条都没往上传; MediaCard 上更是完全没有画质标识。
+画质 / 音轨 / 字幕格式化的回归锁: 分辨率与 HDR 判定、音轨与字幕轨摘要、
+语言码归一、脏 JSON 容错, 以及卡片角标与详情页技术行的端到端展示。
+取值样本采用 ffprobe 真实输出的形态。
 """
 import json
 
@@ -27,13 +20,13 @@ from app.utils.quality import (
     subtitle_summary, tech_tooltip,
 )
 
-# --- 用户库里的真实取值 -------------------------------------------------
-# Cyberpunk Edgerunners S01E01 的音轨 (ffprobe 原样输出)
+# --- ffprobe 真实输出样本 -------------------------------------------------
+# Cyberpunk Edgerunners S01E01 的音轨
 AUDIO_JSON = json.dumps([
     {"index": 1, "codec": "dts", "lang": "jpn"},
     {"index": 2, "codec": "flac", "lang": "eng"},
 ])
-# 同一集的字幕轨, 取真实的 12 条 (原文件有 35 条, 语言码种类已覆盖全)
+# 同一集的字幕轨 12 条 (语言码种类已覆盖)
 SUB_JSON = json.dumps([
     {"index": 3, "codec": "hdmv_pgs_subtitle", "lang": "eng"},
     {"index": 4, "codec": "subrip", "lang": "eng"},
@@ -72,8 +65,7 @@ class TestResolution:
     @pytest.mark.parametrize("w,h,want", [
         (1920, 1080, "1080p"),
         (3840, 2160, "4K"),
-        # ↓ 库里真实存在的三个变形宽银幕文件: 按高度算会落到 1440 档误报 "2K",
-        #   而它们是 4K 母版裁出来的。这条就是那次误报的回归锁。
+        # 变形宽银幕: 按高度会误落到 1440 档, 须按宽度判为 4K
         (3840, 1608, "4K"),
         (3840, 1600, "4K"),
         (3840, 1604, "4K"),
@@ -103,11 +95,11 @@ class TestHdr:
         assert hdr_label(raw) == want
 
     def test_sdr_is_not_hidden(self):
-        # 原先 detail_page 把 SDR 过滤掉了, 用户就分不清「没 HDR」还是「没读到」
+        # SDR 也要显示, 用来区分「没 HDR」和「没读到」
         assert hdr_label("SDR") == "SDR"
 
     def test_best_of_many_files(self):
-        # 返回**原始值**, 不是展示标签 —— 数据层不该掺 UI 文案
+        # 返回原始值而不是展示标签 —— 数据层不掺 UI 文案
         assert best_hdr(["SDR", "HDR10", "Dolby Vision"]) == "Dolby Vision"
         assert best_hdr(["SDR", "SDR"]) == "SDR"
         assert best_hdr([]) == ""
@@ -149,10 +141,7 @@ class TestTracks:
     def test_list_input_passthrough(self):
         assert parse_tracks([{"codec": "dts"}]) == [{"codec": "dts"}]
 
-    # ↓ 这一组的取值来自用户库里「帕丁顿1」的真实音轨。
-    #   我最初的实现漏了它们: 测试样本用的是 jpn/eng, 而真库里是 deu(639-2/T 码)
-    #   和音轨里的 chi, 于是渲染出 "DTS(deu) / DTS(deu)" 这种没翻译又重复的串。
-    #   真实数据一跑就露馅, 干净样本永远不会。
+    # 「帕丁顿1」真实音轨样本: 含 deu / chi 语言码与重复的 (codec, lang) 组合
     REAL_PAD_AUDIO = json.dumps([
         {"index": 1, "codec": "dts", "lang": "deu"},
         {"index": 2, "codec": "dts", "lang": "deu"},
@@ -178,8 +167,7 @@ class TestTracks:
     def test_subtitle_lang_code_sets_all_recognised(self, code, want):
         raw = json.dumps([{"codec": "ass", "lang": code}])
         got = subtitle_summary(raw, brief=True)
-        # 只有一条非中文字幕轨时, 简写会先把"无中字"喊出来 —— 这是有意的,
-        # 用户最想知道的就是有没有中文
+        # 只有一条非中文字幕轨时, 简写会先标出「无中字」—— 这是有意的
         expected = want if want == "中" else f"无中字 · {want}"
         assert got == expected, f"{code} 没被归一成 {want}: 实得 {got!r}"
 
@@ -229,8 +217,7 @@ class TestTechLine:
         assert "3840×1608" in line
 
     def test_missing_fields_do_not_raise(self):
-        # 字段缺失只跳过对应片段; HDR 与字幕那两项是无条件显示的
-        # (字幕缺失时报"无字幕轨"而不是留空, 免得看着像没渲染出来)
+        # 字段缺失只跳过对应片段; HDR 与字幕两项无条件显示
         assert format_tech_line({}) == "SDR · 无字幕轨"
         assert format_tech_line({"height": 1080}) == "1080p · SDR · 无字幕轨"
 
@@ -259,7 +246,7 @@ class TestBadges:
 
 
 # ==========================================================================
-# 端到端: 真库 → StatsService → MediaCard / DetailPage
+# 端到端: 临时库 → StatsService → MediaCard / DetailPage
 # ==========================================================================
 @pytest.fixture
 def library(tmp_path):
@@ -346,7 +333,7 @@ class TestEndToEnd:
             assert want in line, f"技术行缺 {want!r}: {line}"
 
     def test_detail_page_shows_sdr_too(self, library, app):
-        """SDR 必须显示出来 —— 原先被 `not in (None,'','SDR')` 过滤掉了"""
+        """SDR 也必须显示出来, 不能被过滤掉"""
         page = DetailPage(library["sdr"], stats_service=None)
         page.setAttribute(Qt.WA_DontShowOnScreen, True)
         page.show()

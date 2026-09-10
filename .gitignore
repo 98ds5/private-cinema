@@ -4,10 +4,10 @@ __pycache__/
 .venv/
 venv/
 
-# 项目内 conda 环境（约 400 MB，用 conda create -p cinema_env 重建，见 README）
+# 本地环境目录（conda create -p cinema_env 重建，见 README）
 cinema_env/
 
-# agent 工作目录（诊断脚本等临时产物）
+# 临时/调试产物
 .openclaw/
 
 # IDE
@@ -18,6 +18,11 @@ cinema_env/
 data/
 config.json
 LOCAL_NOTES.md
+
+# 课程/个人文档, 仅本地保留
+HANDOFF.md
+1.0.txt
+需求分析和初步项目文档.txt
 
 # 测试缓存
 .pytest_cache/

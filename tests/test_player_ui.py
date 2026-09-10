@@ -1,11 +1,7 @@
-"""
-播放服务引擎切换 + 「正在播放」状态条 测试
+"""播放服务引擎热切换 + 「正在播放」状态条的行为锁。
 
-覆盖:
-  1. PlayerService.set_engine 运行时热切换 (原先只写配置, 必须重启才生效)
-  2. PlayerBar 显隐与进度格式化
-  3. 进度守卫用 isHidden() 而非 isVisible() —— 后者依赖祖先可见性,
-     窗口未 show / 最小化时会让进度更新被静默丢弃
+覆盖 set_engine 的切换/拒绝/去重语义、PlayerBar 显隐与进度格式化,
+以及进度守卫必须用 isHidden() 而非 isVisible() (后者依赖祖先可见性)。
 """
 import sys
 from pathlib import Path
@@ -139,11 +135,7 @@ class TestPlayerBar:
         assert bar._time.text() == ""
 
     def test_updates_work_without_ancestor_shown(self, bar):
-        """
-        守卫必须用 isHidden() 而非 isVisible():
-        父窗口未 show 时 isVisible() 为 False, 若用它做守卫,
-        进度更新会被静默丢弃。
-        """
+        """守卫用 isHidden() 而非 isVisible(): 父窗口未 show 时后者会让进度被静默丢弃"""
         parent = PlayerBar()                     # 充当未显示的祖先容器
         parent.setAttribute(Qt.WA_DontShowOnScreen, True)
         child = PlayerBar(parent)
@@ -155,19 +147,7 @@ class TestPlayerBar:
 
 
 class TestEngineSwitchRealSeam:
-    """
-    回归锁: 切换引擎必须复刻 SettingsPage._on_engine_changed 的真实调用顺序。
-
-    设置页是「先写 config['player']['engine'], 再调 set_engine(同一个值)」,
-    而 PlayerService 与 SettingsPage 共享同一个 config dict (MainWindow 把
-    self.config 同时传给了两边)。engine_type 一旦从 config 读,
-    set_engine 里"没变化就不重建"的守卫就永远命中 → 引擎从不重建,
-    而设置页状态栏还报告"已切换, 立即生效"。
-    实测 mpv↔vividplayer 双向 100% 复现 (2026-09-09 用户手点报"切换播放器失效")。
-
-    ⚠️ 直接调 set_engine() 的测试是**假绿**: 它绕过了"config 先被改写"这个前提。
-    tools/smoke_ui.py 早期版本就是这样假绿过一轮的。
-    """
+    """必须复刻设置页真实顺序: 先改共享 config 再调 set_engine, 直接调会绕过 bug 前提"""
 
     @staticmethod
     def _cfg(engine):
@@ -189,8 +169,8 @@ class TestEngineSwitchRealSeam:
         svc = PlayerService(cfg, mpv_path=None)
         assert svc.engine_type == start
 
-        cfg.setdefault("player", {})["engine"] = target   # settings_page.py:173
-        assert svc.set_engine(target) is True             # settings_page.py:184
+        cfg.setdefault("player", {})["engine"] = target
+        assert svc.set_engine(target) is True
 
         expected = _VividPlayerEngine if target == "vividplayer" else _MpvEngine
         assert isinstance(svc._engine, expected), \

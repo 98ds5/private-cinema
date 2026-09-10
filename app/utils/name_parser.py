@@ -1,22 +1,7 @@
 """
-文件名解析器 — 核心难点 (答辩高频: "你怎么识别电影和动漫")
-
-V1.0 约定式解析策略 (按优先级):
-  1. 文件名含 S##E##  (如 S01E03)  → 动漫, 提取季号+集号
-  2. 文件名含 EP##    (如 EP03)    → 动漫, 默认第 1 季
-  3. 名称/目录含 (YYYY) / .YYYY.   → 提取年份
-  4. 目录下含 "Season N" / "S##" 子目录 → 判定为动漫目录
-  5. 其余按电影处理
-
-标题清洗 (clean_title) 借鉴 Sonarr/Radarr 的 Parser 分类思路, 按类剥离噪声:
-  年份 → 季集标记 → 方括号组 → 音频 → 来源 → 编码 → 分辨率 → HDR → 杂项 → 结尾压制组
-
-两个关键工程决策 (答辩可讲):
-  A. 在分隔符仍为原始 ". _ -" 时就清洗, 而不是先替换成空格再清洗。
-     否则 "DTS-HD.MA.5.1" 会变成 "DTS HD MA 5 1", 短语结构被打散, 命中率骤降。
-  B. 结尾压制组只剥离「破折号前缀」的 token (如 -FraMeSToR),
-     不剥「空格前缀」的, 否则 "Back to the Future Part II" 会被误伤成
-     "Back to the Future Part"。
+文件名解析器: 从资源命名识别电影/动漫, 提取标题、年份、季集号并剥离噪声。
+约定式判定优先级: S##E## 高于 EP## 高于年份 高于 Season/S## 子目录, 其余按电影。
+标题清洗按类剥离噪声, 思路借鉴 Sonarr/Radarr 的 Parser。
 """
 import re
 from pathlib import Path
@@ -41,8 +26,7 @@ RE_SEASON_EPISODE = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")   # S01E03
 RE_EPISODE_ONLY = re.compile(r"(?:EP|Ep|ep)(\d{1,3})")          # EP03
 RE_SEASON_ONLY = re.compile(r"\b[Ss](\d{1,2})\b")               # S01 (无集号)
 
-# 年份右边界允许是字符串结尾: "Interstellar.2014.mkv" 主干为
-# "Interstellar.2014", 年份在末尾, 若强制要求后随分隔符则永远匹配不到。
+# 右边界允许到字符串结尾, 否则 "Interstellar.2014" 这种末尾年份匹配不到
 RE_YEAR = re.compile(r"[\.\[\(\s](\d{4})(?:[\.\]\)\s]|$)")      # (2014) / .2014. / .2014
 
 # ---- 噪声剥离正则 (分类, 借鉴 Sonarr Parser) ----
@@ -94,10 +78,8 @@ RE_MISC = re.compile(
     re.IGNORECASE,
 )
 
-# 多语言音轨列表: 原盘/混流资源常把全部音轨语言码堆在名字里, 例如
-#   Pacific.Rim.2013.Eng.Fre.Ger.Ita.Por.Spa.Cze.Pol.Rus.Tur.Chi.Jpn.2160p...
-# 要求「连续 2 个以上」才剥离 —— 这样单个词不会被误伤:
-#   \bInd\b 匹配不到 "Indiana", \bNor\b 匹配不到 "Norway"。
+# 多语言音轨码堆: 原盘常把语言码连写 (如 ...Eng.Fre.Ger...2160p)。
+# 要求「连续 2 个以上」才剥离, 单个词不误伤 (Ind 匹配不到 Indiana, Nor 匹配不到 Norway)。
 _LANG_CODES = (
     "Eng", "Fre", "Ger", "Ita", "Por", "Spa", "Cze", "Pol", "Rus", "Tur",
     "Chi", "Jpn", "Kor", "Hin", "Ara", "Heb", "Nld", "Swe", "Nor", "Dan",
@@ -109,16 +91,16 @@ RE_LANG_RUN = re.compile(
     re.IGNORECASE,
 )
 
-# 结尾压制组: 仅剥「破折号 + token」, 允许连续多段 (-Group1-Group2)
+# 结尾压制组: 只剥「破折号 + token」(允许多段 -G1-G2), 不剥空格前缀的,
+# 否则 "Back to the Future Part II" 会被误伤成 "Back to the Future Part"
 RE_TRAILING_GROUP = re.compile(r"(?:[\-–][A-Za-z0-9_.]{2,})+\s*$")
 
 
 def clean_title(raw: str) -> str:
     """
-    把资源命名里的年份/季集号/画质/来源/编码/音频/压制组等噪声剥离,
-    得到可读标题。中文标题 (如 "头号玩家") 原样保留。
-
-    注意: 必须在分隔符仍为原始 ". _ -" 时调用, 归一化空白是最后一步。
+    剥离资源命名里的年份/季集/画质/来源/编码/压制组等噪声, 得到可读标题。
+    中文标题 (如 "头号玩家") 原样保留。
+    必须在分隔符仍是原始 ". _ -" 时调用, 归一化空白留到最后一步。
     """
     if not raw:
         return ""
@@ -128,7 +110,7 @@ def clean_title(raw: str) -> str:
     # 1. 年份 (调用方通常已单独提取, 这里再剥一次保证标题干净)
     t = RE_YEAR.sub(" ", t)
 
-    # 2. 季集标记 (S01E03 → EP07 → S01)
+    # 2. 季集标记 (先 S01E03, 再 EP##, 再 S##)
     t = RE_SEASON_EPISODE.sub(" ", t)
     t = RE_EPISODE_ONLY.sub(" ", t)
     t = RE_SEASON_ONLY.sub(" ", t)
@@ -144,7 +126,7 @@ def clean_title(raw: str) -> str:
     # 5. 结尾压制组
     t = RE_TRAILING_GROUP.sub(" ", t)
 
-    # 6. 归一化: 分隔符转空格 → 压缩空白 → 清理残留破折号 → 去首尾噪声
+    # 6. 归一化: 转空格、压缩空白、清理残留破折号、去首尾噪声
     t = re.sub(r"[._]+", " ", t)
     t = re.sub(r"(?:\s*[\-–]\s*){1,}", " ", t)
     t = re.sub(r"\s{2,}", " ", t)
@@ -156,31 +138,25 @@ def clean_title(raw: str) -> str:
 def parse_filename(file_path: str, parent_dir: str = None,
                    root_dir: str = None) -> ParsedName:
     """
-    解析一个视频文件路径 → ParsedName。
+    解析一个视频文件路径, 返回 ParsedName。
+    parent_dir / root_dir: 文件所在目录与媒体库根目录 (root_dir 建议传入)。
 
-    parent_dir: 文件所在目录路径。
-    root_dir:   媒体库根目录路径 (强烈建议传入)。
-
-    标题来源规则 (关键):
-      目录名更规范的前提是「一片一文件夹」布局, 如
-        电影库/盗梦空间 (2010)/Inception.mkv   → 标题取 "盗梦空间"
-      但扁平布局下文件直接躺在库根目录, 如
-        电影库/Inception.2010.1080p.mkv        → 标题必须取文件名,
-      否则整个库会被错误合并成一个以目录名命名的作品。
-      因此: 当 parent_dir 就是 root_dir 时, 视为扁平布局, 忽略目录名。
+    标题来源的关键规则: 只有「一片一文件夹」时才用目录名作标题; 若 parent_dir
+    就是 root_dir (扁平布局, 文件直接躺在库根目录), 必须改用文件名,
+    否则整个库会被错误合并成一个以目录名命名的作品。
     """
     path = Path(file_path)
     filename = path.stem
     result = ParsedName(raw_filename=filename, original_title=filename)
 
-    # 1. S##E## → 动漫
+    # 1. 含 S##E##: 判为动漫
     se_match = RE_SEASON_EPISODE.search(filename)
     if se_match:
         result.season_number = int(se_match.group(1))
         result.episode_number = int(se_match.group(2))
         result.is_anime = True
 
-    # 2. EP## → 动漫, 默认第 1 季
+    # 2. 含 EP##: 判为动漫, 默认第 1 季
     if not se_match:
         ep_match = RE_EPISODE_ONLY.search(filename)
         if ep_match:
@@ -188,7 +164,7 @@ def parse_filename(file_path: str, parent_dir: str = None,
             result.season_number = 1
             result.is_anime = True
 
-    # 扁平布局判定: 文件直接位于库根目录 → 不使用目录名作标题
+    # 扁平布局判定: 文件直接位于库根目录时不使用目录名作标题
     flat_layout = False
     if parent_dir and root_dir:
         try:
@@ -219,7 +195,7 @@ def parse_filename(file_path: str, parent_dir: str = None,
 
 
 def is_anime_directory(dir_path: Path) -> bool:
-    """目录含 'Season N' / 'S##' 子目录 → 判定为动漫目录"""
+    """目录含 Season N / S## 子目录时判为动漫目录"""
     try:
         for child in dir_path.iterdir():
             if child.is_dir() and re.match(

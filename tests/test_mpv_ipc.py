@@ -1,22 +1,7 @@
 """
-MPV JSON IPC 集成回归测试 —— 用真实命名管道假扮 mpv
-
-为什么需要这个文件 (2026-09-09 排查记录, 详见 HANDOFF):
-  MPV 引擎从项目建立起就**从未真正跑通过进度追踪**, 三个致命 bug 叠加:
-    B1  player.py 用了 threading.Thread 却从未 import threading → play() 必抛 NameError
-    B2  在普通 threading.Thread 里 start QTimer → 定时器永不触发, _poll 从不执行
-    B3  把整块管道缓冲丢给 json.loads → mpv 的异步事件与命令回复交错,
-        实测一次 get_property 回来 991 字节 / 11 行, 解析必然失败
-
-  这三个 bug 的共同点: 只有「真管道 + 真异步事件流 + 真跨线程」才暴露得出来,
-  纯 mock 对象一律测不到。所以这里在测试进程内起一个**真实的 Windows 命名管道
-  服务端**忠实复现 mpv 的 IPC 行为, 只把 mpv 可执行文件的启动换成桩。
-
-fake mpv 复现的真 mpv 行为 (全部由实跑探针取证, 不是猜的):
-  1. 客户端一连上就主动推事件行 (start-file / file-loaded / *-reconfig)
-  2. 命令回复与异步事件在**同一次写入**里交错 → 单次 ReadFile 会拿到多行
-  3. 一行 JSON 可能被拆到两次 ReadFile 里 → 客户端必须自己维护持久缓冲
-  4. 回复带 request_id, 事件行没有 → 必须靠 request_id 配对, 不能只按行拆
+MPV JSON IPC 集成回归测试: 在测试进程内起真实的 Windows 命名管道服务端
+假扮 mpv, 只把可执行文件的启动换成桩。锁死跨线程 QTimer 轮询、分块 JSON
+行解析、request_id 配对、进度落库与进程退出落盘、管道名唯一等真实行为。
 """
 import ctypes
 import json
@@ -78,19 +63,12 @@ _PIPE_WAIT = 0x00000000
 _INVALID_HANDLE = wintypes.HANDLE(-1).value
 _ERROR_PIPE_CONNECTED = 535
 
-_DURATION = 1444.985          # 探针实测到的真值
+_DURATION = 1444.985          # fake 服务端回复的时长, 断言共用
 
 
 class FakeMpv:
-    """
-    在测试进程内扮演 mpv 的 JSON IPC 服务端。
-
-    刻意制造真 mpv 的三种"脏"数据形态, 用来锁死 B3:
-      - 第 1 次 get_property: 回复 + 10 行异步事件, **一次 WriteFile 全部写出**
-        (复刻探针抓到的 991 字节 / 11 行)
-      - 第 2 次 get_property: 把一行 JSON **拆成两次 WriteFile**, 中间隔 30ms
-      - 其余每次: 回复前先塞一行无关事件
-    """
+    """扮演 mpv 的 JSON IPC 服务端, 刻意制造三种脏形态: 回复与多行事件一次写出、
+    单行 JSON 拆两次写出、回复前塞一行无关事件"""
 
     def __init__(self, pipe_name: str):
         self.pipe_name = pipe_name
@@ -125,7 +103,7 @@ class FakeMpv:
                 return
 
         self.connected.set()
-        # 真 mpv 一连上就推事件 (探针实测)
+        # 真 mpv 一连上就主动推事件行
         self._write(h, '{"event": "start-file", "playlist_entry_id": 1}\n')
 
         pending = b""
@@ -273,12 +251,7 @@ def engine(monkeypatch):
 
 
 def _pump(pred, timeout=10.0):
-    """
-    泵事件循环直到条件成立。
-
-    必须泵: IPC 在后台线程, 进度是经 Qt 信号投递回主线程的 (queued connection),
-    不 processEvents 就永远收不到。
-    """
+    """泵事件循环直到条件成立: IPC 结果经 Qt 信号 queued 回主线程, 不泵收不到"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         _app.processEvents()
@@ -290,12 +263,7 @@ def _pump(pred, timeout=10.0):
 
 
 def _start_fake(engine, media):
-    """
-    先 play(), 再从引擎读出它自己生成的管道名, 然后才起服务端。
-
-    故意反过来做: 这样同时验证了"客户端必须重试连接"——真机上 mpv 建管道
-    实测要 0.69s / 3 次尝试, 只连一次的实现必然失败。
-    """
+    """先 play() 再从引擎读出管道名, 之后才起服务端: 顺带验证客户端会重试连接"""
     fake = FakeMpv("")          # 管道名占位, play() 之后才知道
     engine.play(media["path"], media["media_id"])
     fake.pipe_name = engine._pipe_name
@@ -309,20 +277,12 @@ def _start_fake(engine, media):
 class TestMpvIpc:
 
     def test_play_does_not_raise(self, engine, movie):
-        """
-        回归锁 B1: player.py 使用 threading.Thread 却从未 import threading,
-        play() 在 Popen 成功后必抛 NameError —— mpv 窗口开得出来,
-        但 IPC 永不连接, 进度追踪一次都没生效过。
-        """
+        """play() 不得抛 NameError (缺 import), 成功后引擎应处于播放态"""
         engine.play(movie["path"], movie["media_id"])
         assert engine.is_playing, "play() 之后引擎应处于播放态"
 
     def test_pipe_name_is_unique_per_play(self, engine, movie):
-        """
-        回归锁 B8: 管道名原先是 \\\\.\\pipe\\mpv-pc-{media_id}, 只含 media_id。
-        上一次播放残留的 mpv 还占着同名管道时, 新播放会连到**别人的 mpv** 上,
-        读到的是别的片子的进度。必须带进程/随机成分。
-        """
+        """两次播放的管道名必须不同: 只含 media_id 会连到残留 mpv 的同名管道上"""
         engine.play(movie["path"], movie["media_id"])
         first = engine._pipe_name
         engine.stop()
@@ -331,16 +291,7 @@ class TestMpvIpc:
         assert first != second, f"同一作品两次播放管道名撞了: {first}"
 
     def test_mpv_own_resume_is_disabled(self, engine, movie):
-        """
-        回归锁 B9: mpv 自带观看位置记忆, 会在 mpv 侧另存一份进度。
-
-        真机实测 (mpv-lazy 的 portable_config\\mpv.conf 里有
-        save-position-on-quit=yes + watch-later-options=start,...):
-        即使我们 start_pos=0、完全不传 --start, mpv 也从它自己缓存的位置接着放
-        —— 那一轮首个 time-pos 是 625 而不是 0, 播放 6 秒后落库却是 646。
-        后果是本 app 的数据库不是唯一事实来源, 续播听谁的并不确定,
-        两边记录还会各自漂移。必须显式关掉。
-        """
+        """必须显式禁用 mpv 自身的观看位置记忆, 本 app 数据库是唯一事实来源"""
         engine.play(movie["path"], movie["media_id"])
         cmd = engine._process.cmd
         assert "--no-resume-playback" in cmd, \
@@ -365,13 +316,7 @@ class TestMpvIpc:
         assert not any(c.startswith("--start=") for c in engine._process.cmd)
 
     def test_connects_and_reports_position(self, engine, movie):
-        """
-        回归锁 B2 + B3: 进度必须真的从管道里读出来并经信号回到主线程。
-
-        B2 —— QTimer 在普通 threading.Thread 里 start 永不触发, _poll 从不执行;
-        B3 —— 整块 json.loads 撞上 mpv 的异步事件流必然 Extra data 报错。
-        任一个存在, 这里都收不到任何 position。
-        """
+        """进度必须真的从管道读出并经信号回到主线程 (跨线程定时器 + 事件交错解析)"""
         errors: list = []
         positions: list = []
         engine.playback_error.connect(errors.append)
@@ -416,19 +361,14 @@ class TestMpvIpc:
             assert m.last_watched_at is not None, "last_watched_at 未写入"
 
     def test_request_id_is_sent(self, engine, movie):
-        """
-        回归锁 B4: 不带 request_id 时 mpv 的回复 request_id 恒为 0,
-        与异步事件交错后**无法判定哪一行是本次命令的回复**。
-        必须每条命令带唯一 request_id 并据此配对。
-        """
+        """每条命令须带唯一递增的 request_id, 否则无法从混杂流中配对回复"""
         fake = _start_fake(engine, movie)
         try:
             assert fake.connected.wait(10), fake.failure
             assert _pump(lambda: engine._duration > 0), "未拿到 duration"
         finally:
             fake.stop()
-        # fake 记录的是 command 字段; request_id 的断言靠"能正确配对"间接完成,
-        # 这里再直接确认引擎确实往管道写了 request_id 字段。
+        # 再直接确认引擎确实给每条命令分配了递增的 request_id
         assert engine._next_request_id > 1, \
             "引擎应给每条命令分配递增的 request_id"
 
@@ -454,11 +394,7 @@ class TestMpvIpc:
 
 
 class TestIpcLineParsing:
-    """
-    IPC 字节流解析的纯函数单测 —— 这是 B3 的最小可复现 seam。
-
-    输入全部取自探针实测的真 mpv 输出, 不是编的。
-    """
+    """IPC 字节流解析的纯函数单测, 输入取自真 mpv 的输出形态"""
 
     def _parse(self, *args):
         from app.services.player import _iter_json_lines
@@ -470,7 +406,7 @@ class TestIpcLineParsing:
         assert rest == b""
 
     def test_multiple_lines_in_one_chunk(self):
-        """真 mpv 实测形态: 一次读回 11 行, 只有第 1 行是回复"""
+        """一次读回多行: 只有第 1 行是回复, 其余是事件行"""
         blob = (b'{"data":0.0,"request_id":0,"error":"success"}\n'
                 b'{"event":"audio-reconfig"}\n'
                 b'{"event":"file-loaded"}\n'
