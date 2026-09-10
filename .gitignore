@@ -30,7 +30,10 @@ config.json
 # 打包产物
 build/
 dist/
-*.spec
 
-# mpv 内嵌包（CI / 下载脚本自动获取，不入库）
-_mpv/
+# PyInstaller spec (cinema.spec 除外)
+*.spec
+!cinema.spec
+
+# 外部工具（mpv / ffmpeg / ffprobe，CI 或下载脚本自动拉取，不入库）
+_tools/
