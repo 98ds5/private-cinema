@@ -10,11 +10,12 @@ import subprocess
 
 import pytest
 from PySide6.QtGui import QColor, QPixmap
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from app.database import get_session, init_database
 from app.models.tables import Media, MediaFile
 from app.services import posters as P
+from app.ui.pages.detail_page import DetailPage
 from app.ui.pages.settings_page import SettingsPage
 from app.ui.widgets.media_card import MediaCard
 from app.utils import path_detector as PD
@@ -469,6 +470,80 @@ class TestCardPoster:
         card = MediaCard({"id": 14, "title": "竖版", "poster": str(jpg)})
         pm = card._poster.pixmap()
         assert pm.width() == MediaCard.CARD_W, "左右留了黑边, 说明没用 Expanding"
+
+
+# ==========================================================================
+# DetailPage 显示海报 (用户报: "影视库海报有了, 进详情页却没有海报")
+# ==========================================================================
+class TestDetailPagePoster:
+    """
+    `_load()` 一直把 `Media.poster_path` 物化成 `media["poster"]`, 但 `_show_info`
+    从来没用过它 —— 永远渲染首字母占位, 于是卡片有图、详情页没图。
+    这里走真实 seam: init_database → `DetailPage(media_id)` 构造即加载,
+    和 `MainWindow._open_detail` 是同一条链, 不直接调 `_show_info` 喂假 dict。
+    """
+    # 详情页海报区实测尺寸 (_show_info 里 setFixedSize(200, 280))
+    W, H = 200, 280
+
+    @pytest.fixture
+    def seeded(self, tmp_path):
+        """两部作品: id=1 有海报文件, id=2 没有; 各配一个视频文件"""
+        init_database(str(tmp_path / "cinema.db"))
+        jpg = _make_jpg(tmp_path / "posters" / "1.jpg", 400, 600)
+        with get_session() as s:
+            s.add(Media(id=1, title="有海报的电影", media_type="movie", year=2020,
+                        poster_path=str(jpg)))
+            s.add(Media(id=2, title="没海报的电影", media_type="movie", year=2021))
+            s.flush()
+            for i in (1, 2):
+                f = tmp_path / f"movie{i}.mkv"
+                f.write_bytes(b"\0" * 64)
+                s.add(MediaFile(media_id=i, file_path=str(f), file_name=f.name,
+                                duration=1000, parse_status="success"))
+            s.commit()
+        return tmp_path
+
+    @staticmethod
+    def _poster(page):
+        lbl = page.findChild(QLabel, "posterPlaceholder")
+        assert lbl is not None, "详情页找不到海报 QLabel"
+        return lbl
+
+    def test_shows_the_image_when_the_db_has_a_poster(self, app, seeded):
+        page = DetailPage(1, stats_service=None)
+        lbl = self._poster(page)
+        pm = lbl.pixmap()
+        assert pm is not None and not pm.isNull(), \
+            "库里有海报文件, 详情页却还在用首字母占位"
+        assert (pm.width(), pm.height()) == (self.W, self.H), \
+            f"海报该填满 {self.W}x{self.H}, 实得 {pm.width()}x{pm.height()}"
+        assert lbl.text() == "", "显示图片时不该再叠着占位文字"
+
+    def test_placeholder_when_no_poster(self, app, seeded):
+        page = DetailPage(2, stats_service=None)
+        lbl = self._poster(page)
+        assert lbl.pixmap() is None or lbl.pixmap().isNull()
+        assert lbl.text() == "没海", "该退回标题前两字占位"
+
+    def test_placeholder_when_path_is_stale(self, app, seeded):
+        """DB 里的路径可能失效 (用户挪走/删了 data/posters), 不能显示成一块空白"""
+        with get_session() as s:
+            s.get(Media, 1).poster_path = str(seeded / "posters" / "gone.jpg")
+            s.commit()
+        page = DetailPage(1, stats_service=None)
+        assert self._poster(page).text() == "有海"
+
+    def test_placeholder_when_file_is_not_an_image(self, app, seeded):
+        (seeded / "posters" / "1.jpg").write_bytes(b"definitely not a jpeg")
+        page = DetailPage(1, stats_service=None)
+        assert self._poster(page).text() == "有海", "解码失败要退回占位"
+
+    def test_vertical_cover_is_center_cropped_not_letterboxed(self, app, seeded):
+        """竖版 2:3 封面 → 200x280 海报区必须 Expanding + 居中裁, 不留黑边"""
+        page = DetailPage(1, stats_service=None)
+        pm = self._poster(page).pixmap()
+        assert pm is not None and not pm.isNull()
+        assert pm.width() == self.W, "左右留了黑边, 说明没用 Expanding"
 
 
 # ==========================================================================

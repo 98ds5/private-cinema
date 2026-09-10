@@ -1,0 +1,6 @@
+# 文本自动检测: 仓库内存 LF, 检出按平台 (HANDOFF §8.6, push GitHub 前必加,
+# 否则提交时 LF→CRLF 警告刷屏)
+* text=auto
+
+# Windows 批处理必须 CRLF (cmd.exe 按 CRLF 解析, LF 下标签跳转可能出错)
+*.bat text eol=crlf

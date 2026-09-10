@@ -10,10 +10,12 @@
      这样 Echo/Prism × 明/暗 四种组合都自动适配。
 """
 from typing import Optional
+import os
 
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QPushButton, QScrollArea,
 )
+from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt
 
 from app.database import get_session
@@ -23,6 +25,11 @@ from app.utils.quality import format_tech_line, tech_tooltip
 
 
 class DetailPage(QWidget):
+    # 详情页海报区固定尺寸。提成类常量: 布局、_apply_poster、回归测试
+    # 三处都引用它, 别再各写各的魔数 (HANDOFF §4.27 的教训)。
+    POSTER_W = 200
+    POSTER_H = 280
+
     def __init__(self, media_id: int = None,
                  stats_service: Optional[StatsService] = None,
                  parent=None):
@@ -157,11 +164,15 @@ class DetailPage(QWidget):
     def _show_info(self, media: dict, files: list):
         self._clear_layout(self._info_layout)
 
-        # 海报占位 (未接刮削, 用标题首字)
+        # 海报: 有真图就显示图, 没有 (或路径失效/解码失败) 保持标题前两字占位。
+        # _load() 一直把 Media.poster_path 物化成 media["poster"], 但这里原先
+        # 从来没人消费它 → 影视库卡片有图、进详情页却永远是占位
+        # (用户报的"海报是有了, 但是进去详情页没有海报了", 根因即此)。
         poster = QLabel(media["title"][:2] if media["title"] else "?")
         poster.setObjectName("posterPlaceholder")
-        poster.setFixedSize(200, 280)
+        poster.setFixedSize(self.POSTER_W, self.POSTER_H)
         poster.setAlignment(Qt.AlignCenter)
+        self._apply_poster(poster, media.get("poster"))
         self._info_layout.addWidget(poster)
 
         meta = QVBoxLayout()
@@ -237,6 +248,26 @@ class DetailPage(QWidget):
             self._files_title.setText(f"视频文件 · 共 {len(files)} 个")
 
         self._show_files(media, files)
+
+    def _apply_poster(self, label: QLabel, src: Optional[str]):
+        """
+        有海报文件就显示图, 没有 (或路径失效 / 解码失败) 就保持占位文字。
+
+        与 MediaCard._apply_poster 同一套路: 封面多为竖版 2:3, 海报区是
+        200x280, 直接 KeepAspectRatio 会左右留黑边; 用 KeepAspectRatioByExpanding
+        填满再居中裁一刀。IgnoreAspectRatio 会把人脸拉扁, 更不行。
+        """
+        if not src or not os.path.isfile(src):
+            return
+        pm = QPixmap(src)
+        if pm.isNull():
+            return                        # 文件在但解不出来 → 继续用占位, 别留一块空白
+        pm = pm.scaled(self.POSTER_W, self.POSTER_H,
+                       Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        x = max(0, (pm.width() - self.POSTER_W) // 2)
+        y = max(0, (pm.height() - self.POSTER_H) // 2)
+        label.setPixmap(pm.copy(x, y, self.POSTER_W, self.POSTER_H))
+        label.setText("")
 
     # ------------------------------------------------------------------
     # 文件 / 剧集列表
