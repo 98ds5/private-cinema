@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
 私人影院 PyInstaller 打包配置。
-内嵌 _mpv/ 目录，打出的包开箱即用，无需用户自行安装 mpv。
+内嵌 _tools/ 目录 (mpv / ffmpeg / ffprobe)，打出的包开箱即用。
 构建: pyinstaller cinema.spec
 """
 from pathlib import Path
@@ -10,16 +10,16 @@ datas = []
 binaries = []
 hiddenimports = []
 
-# 内嵌 mpv (_mpv/ -> _internal/mpv/)
-_mpv_dir = Path(__file__).parent / "_mpv"
-if _mpv_dir.is_dir():
-    for f in _mpv_dir.rglob("*"):
+# 内嵌工具集 (_tools/ -> _internal/_tools/)
+_tools_dir = Path(SPECPATH) / "_tools"
+if _tools_dir.is_dir():
+    for f in _tools_dir.rglob("*"):
         if f.is_file():
-            rel = f.relative_to(_mpv_dir.parent)
+            rel = f.relative_to(_tools_dir.parent)
             datas.append((str(f), str(rel.parent)))
-    print(f"[SPEC] 已内嵌 mpv ({_mpv_dir})")
+    print(f"[SPEC] 已内嵌工具集 ({_tools_dir})")
 else:
-    print("[SPEC] 警告: _mpv/ 不存在，构建的包不含 mpv")
+    print("[SPEC] 警告: _tools/ 不存在，构建的包不含外部工具")
 
 block_cipher = None
 
