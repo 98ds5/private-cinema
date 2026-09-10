@@ -36,21 +36,20 @@ python main.py
 
 | 工具 | 用途 | 安装方式 |
 |------|------|---------|
-| **mpv** | 播放引擎（JSON IPC） | `.\scripts\download-mpv.ps1` 自动拉取到 `_mpv/` |
-| **ffprobe** | 解析视频参数（分辨率/编码/HDR） | [ffmpeg.org](https://ffmpeg.org/download.html) 或 `winget install ffmpeg` |
-| **ffmpeg** | 截取内嵌封面 | 同 ffprobe，官方构建两个 exe 放一起 |
+| **mpv** | 播放引擎（JSON IPC） | `.\scripts\download-tools.ps1` 自动拉取到 `_tools/` |
+| **ffprobe** | 解析视频参数（分辨率/编码/HDR） | 同上，一起下载到 `_tools/` |
+| **ffmpeg** | 截取内嵌封面 | 同上 |
 
-- **mpv**（~120 MB）不直接进 git 仓库，首次使用先运行下载脚本：
+- **mpv / ffmpeg / ffprobe** 全部通过一个脚本自动拉取：
 
   ```powershell
-  .\scripts\download-mpv.ps1
+  .\scripts\download-tools.ps1
   ```
 
-  脚本自动从 GitHub 获取最新发布版，解压并清理，只需跑一次。
-- **ffprobe / ffmpeg** 需自行安装或通过包管理器安装（`winget install ffmpeg` / `choco install ffmpeg`）
+  脚本从 GitHub 获取最新发布版，解压到 `_tools/`，只需跑一次。
 - 也可在 `config.json` 的 `ffmpeg.ffprobe_path` 和 `player.mpv_path` 中写死路径
 
-> **打包分发版**不含此限制：`cinema.spec` 打包时会自动把 `_mpv/` 带进去，
+> **打包分发版**不含此限制：`cinema.spec` 打包时自动把 `_tools/` 带进去，
 > 用户装完即用，无需运行下载脚本。
 
 ## 播放引擎
@@ -81,13 +80,15 @@ pyinstaller cinema.spec
 私人影院/
 ├── main.py                  # 程序入口
 ├── requirements.txt
-├── cinema.spec              # PyInstaller 打包配置 (打包时自动包含 _mpv/)
+├── cinema.spec              # PyInstaller 打包配置 (打包时自动包含 _tools/)
 ├── config.json              # 首次运行自动生成
-├── _mpv/                    # mpv 播放器 (运行 download-mpv.ps1 后生成)
+├── _tools/                  # 外部工具 (运行 download-tools.ps1 后生成)
 │   ├── mpv.exe
+│   ├── ffmpeg.exe
+│   ├── ffprobe.exe
 │   └── d3dcompiler_43.dll
 ├── scripts/
-│   └── download-mpv.ps1     # mpv 下载脚本
+│   └── download-tools.ps1   # 一键下载 mpv + ffmpeg/ffprobe
 ├── app/
 │   ├── database.py          # 数据库初始化 (WAL) + 会话管理
 │   ├── models/tables.py     # 5 张表: libraries/media/media_files/seasons/episodes
