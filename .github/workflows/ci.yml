@@ -30,10 +30,10 @@ jobs:
     - name: Install ffmpeg (for ffprobe)
       run: choco install ffmpeg -y --no-progress
 
-    - name: Download mpv
+    - name: Download mpv + ffmpeg
       run: |
-        if (!(Test-Path "_mpv/mpv.exe")) {
-          .\scripts\download-mpv.ps1
+        if (!(Test-Path "_tools/mpv.exe")) {
+          .\scripts\download-tools.ps1
         }
 
     - name: Run tests
