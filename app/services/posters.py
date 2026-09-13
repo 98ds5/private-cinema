@@ -42,9 +42,22 @@ _SAFETY_MARGIN = 1.0         # 秒: 别贴着片尾截, 否则截不到帧
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
+def app_root() -> Path:
+    """程序根目录: 打包后是 exe 所在目录, 源码模式是项目根。
+
+    不能用 __file__ 一种写法糊到底: PyInstaller 把模块塞进 PYZ 后,
+    __file__ 会变成 `<sys._MEIPASS>/app/services/posters.pyc`, 上溯两级是
+    `_internal/` —— 海报就会写进 exe 旁边的隐藏目录, 和 config.json 里的
+    `./data/cinema.db`(exe 同级的 data/) 分家。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
 def posters_dir() -> Path:
-    """`<项目根>/data/posters`, 用 __file__ 推项目根, 不依赖当前工作目录。"""
-    return Path(__file__).resolve().parents[2] / "data" / "posters"
+    """`<程序根>/data/posters` —— 和数据库同处一个 data/, 不依赖当前工作目录。"""
+    return app_root() / "data" / "posters"
 
 
 def poster_file(media_id: int) -> Path:
@@ -84,6 +97,21 @@ def _run(cmd: list, timeout: int) -> subprocess.CompletedProcess:
         encoding="utf-8",
         errors="replace",
     )
+
+
+def _prepare_out_dir(out: Path) -> bool:
+    """在调 ffmpeg **之前**把输出目录建好。
+
+    ffmpeg 自己不会建目录: 目录不在就 `Could not open file` + rc=-2, 一个字节都不写。
+    而 _finalize 里的 mkdir 在 ffmpeg 之后, 且 tmp 不存在时提前 return,
+    所以"目录不存在"这件事永远轮不到它去补救 —— 全新安装(打包版 / 新克隆, data/ 被
+    gitignore)第一次点提取, 必然全军覆没, 且界面上只会显示"没有封面"。
+    """
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 # ----------------------------------------------------------------------
@@ -153,6 +181,8 @@ def extract_stream(ffmpeg: Optional[str], video_path: str,
     """把内嵌封面那条流抽成 jpg (压到长边 <=448、保持比例)。成功返回 True。"""
     if not ffmpeg or not video_path or not os.path.isfile(video_path):
         return False
+    if not _prepare_out_dir(out_path):
+        return False
     tmp = _tmp_out(out_path)
     try:
         _run([
@@ -179,6 +209,8 @@ def extract_frame(ffmpeg: Optional[str], video_path: str,
     if not ffmpeg or not video_path or not os.path.isfile(video_path):
         return False
     ts = max(0.0, float(timestamp))
+    if not _prepare_out_dir(out_path):
+        return False
     tmp = _tmp_out(out_path)
     try:
         _run([

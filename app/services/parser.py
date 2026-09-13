@@ -94,6 +94,12 @@ class ParseWorker(QThread):
                  "-print_format", "json",
                  "-show_format", "-show_streams", path],
                 capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+                # 必须写死 utf-8: ffprobe 输出里带 mkv 的 UTF-8 元数据(片名/标签),
+                # text=True 不给 encoding 时按系统 ANSI 码页(cp936)解码 -> 解码线程抛
+                # UnicodeDecodeError -> r.stdout 变成 None -> json.loads 抛 TypeError
+                # -> 被下面 except 吞掉 -> 整批文件被误判成 "ffprobe 无返回或超时"。
+                # 打包版没有 PYTHONUTF8=1, 所以只有打包后才暴露。
+                encoding="utf-8", errors="replace",
             )
             if r.returncode != 0:
                 return None

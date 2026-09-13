@@ -5,6 +5,8 @@ posters_dir() 打桩到 tmp_path, 避免测试写进真实的 data/posters/。
 """
 import json
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from PySide6.QtGui import QColor, QPixmap
@@ -215,6 +217,103 @@ class TestExtractStream:
         monkeypatch.setattr(P, "_run", _fake_run(
             raises=subprocess.TimeoutExpired(cmd="ffmpeg", timeout=60)))
         assert P.extract_stream("ffmpeg", str(video), 1, tmp_path / "x.jpg") is False
+
+
+# ==========================================================================
+# 输出目录必须先建好 (真实事故: 打包版点"提取内嵌封面"一张都出不来)
+# ==========================================================================
+class _RealFfmpeg:
+    """像真 ffmpeg 那样认目录的替身: 输出目录不在 -> rc=-2 且什么都不写。
+
+    原来的替身全都自己 mkdir 再写文件, 把"ffmpeg 不会建目录"这个真实前提
+    给打桩掉了 —— 于是这个 bug 一路绿灯溜到打包版。
+    """
+
+    def __init__(self):
+        self.cmds = []
+
+    def __call__(self, cmd, timeout):
+        self.cmds.append(cmd)
+        out = Path(cmd[-1])
+        if not out.parent.is_dir():
+            return subprocess.CompletedProcess(
+                cmd, 4294967294, "",
+                "[image2 @ 0x1] Could not open file : "
+                f"{out}\nError submitting a packet to the muxer: "
+                "No such file or directory")
+        # 写一张真能解码的图: 后面还有黑屏检测, 假字节会被判成"黑屏"而丢掉
+        _make_jpg(out, 64, 96, color="crimson")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+
+class TestOutputDirBootstrap:
+    def test_frame_extraction_creates_a_missing_posters_dir(self, video, tmp_path, monkeypatch):
+        """全新安装(data/ 被 gitignore)下第一次截帧: 目录得由我们自己建"""
+        out = tmp_path / "data" / "posters" / "1.jpg"
+        assert not out.parent.exists(), "前提: 目录一开始就不存在"
+        ff = _RealFfmpeg()
+        monkeypatch.setattr(P, "_run", ff)
+        assert P.extract_frame("ffmpeg", str(video), 12.5, out) is True
+        assert out.is_file() and out.stat().st_size > 0
+
+    def test_embedded_extraction_creates_a_missing_posters_dir(self, video, tmp_path, monkeypatch):
+        out = tmp_path / "data" / "posters" / "2.jpg"
+        ff = _RealFfmpeg()
+        monkeypatch.setattr(P, "_run", ff)
+        assert P.extract_stream("ffmpeg", str(video), 9, out) is True
+        assert out.is_file()
+
+    def test_dir_is_ready_before_ffmpeg_is_called(self, video, tmp_path, monkeypatch):
+        """顺序锁: mkdir 必须在 _run 之前, 事后补救已经晚了(ffmpeg 早退出了)"""
+        out = tmp_path / "data" / "posters" / "3.jpg"
+        seen = []
+
+        def _r(cmd, timeout):
+            seen.append(Path(cmd[-1]).parent.is_dir())
+            return _RealFfmpeg()(cmd, timeout)
+
+        monkeypatch.setattr(P, "_run", _r)
+        P.extract_frame("ffmpeg", str(video), 1.0, out)
+        assert seen == [True], "调 ffmpeg 的时候目录还不存在"
+
+    def test_ensure_poster_bootstraps_the_dir_end_to_end(self, posters_dir, video, monkeypatch):
+        """整条链路: 目录不存在 + 没有内嵌封面 -> 靠截帧也要出一张图"""
+        monkeypatch.setattr(P, "_run", _RealFfmpeg())
+        monkeypatch.setattr(P, "find_attached_pic", lambda *a, **k: None)
+        monkeypatch.setattr(P, "find_manual_poster", lambda *a, **k: None)
+        path, source = P.ensure_poster(4, [str(video)], "ffprobe", "ffmpeg",
+                                       durations=[600.0])
+        assert source == "frame@10%" and path == str(posters_dir / "4.jpg")
+        assert (posters_dir / "4.jpg").stat().st_size > 0
+
+    def test_unwritable_dir_is_reported_as_failure_not_a_crash(self, video, tmp_path, monkeypatch):
+        """目录建不出来(权限/盘符拔了)要老实返回 False, 别把整批带崩"""
+        out = tmp_path / "data" / "posters" / "5.jpg"
+        monkeypatch.setattr(P, "_prepare_out_dir", lambda o: False)
+        monkeypatch.setattr(P, "_run", pytest.fail)      # 何况也不该去调 ffmpeg
+        assert P.extract_frame("ffmpeg", str(video), 1.0, out) is False
+
+
+# ==========================================================================
+# 打包后的海报目录 (真实事故: 海报被写进 _internal\data\posters)
+# ==========================================================================
+class TestAppRoot:
+    def test_source_mode_uses_the_project_root(self):
+        expected = Path(P.__file__).resolve().parents[2]
+        assert P.app_root() == expected
+        assert P.posters_dir() == expected / "data" / "posters"
+
+    def test_frozen_mode_uses_the_exe_dir_not_meipass(self, monkeypatch, tmp_path):
+        """PyInstaller 下 __file__ 是 <_MEIPASS>/app/services/posters.pyc,
+        上溯两级会落到 _internal/ —— 海报就和 exe 同级的 data/ 分家了"""
+        exe = tmp_path / "私人影院" / "私人影院.exe"
+        exe.parent.mkdir(parents=True)
+        exe.write_bytes(b"MZ")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", str(exe))
+        monkeypatch.setattr(sys, "_MEIPASS", str(exe.parent / "_internal"), raising=False)
+        assert P.app_root() == exe.parent
+        assert P.posters_dir() == exe.parent / "data" / "posters"
 
 
 # ==========================================================================
@@ -612,12 +711,12 @@ class TestDetectFfmpeg:
         probe.write_bytes(b"x")
         sib = tmp_path / "ffmpeg.exe"
         sib.write_bytes(b"x")
-        monkeypatch.setattr(PD, "_detect", lambda tool, custom=None: None)
+        monkeypatch.setattr(PD, "_detect_bundled", lambda tool, custom=None: None)
         monkeypatch.setattr(PD, "detect_ffprobe", lambda *_a, **_k: str(probe))
         assert PD.detect_ffmpeg() == str(sib)
 
     def test_none_when_nothing_found(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(PD, "_detect", lambda tool, custom=None: None)
+        monkeypatch.setattr(PD, "_detect_bundled", lambda tool, custom=None: None)
         monkeypatch.setattr(PD, "detect_ffprobe", lambda *_a, **_k: None)
         assert PD.detect_ffmpeg() is None
 
