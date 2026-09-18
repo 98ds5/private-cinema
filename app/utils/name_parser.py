@@ -36,13 +36,29 @@ _S = r"[._\-\s]*"
 # 方括号内容: 字幕组/压制组最常见的落点
 RE_BRACKET = re.compile(r"\[[^\]]*\]|【[^】]*】")
 
-# 音频: 长短语优先, 避免裸 HD / 5.1 先把短语打散
+# 音频: 长短语优先, 避免裸 HD / 5.1 先把短语打散。
+# ⚠️ 声道数必须和编码符「连在一起」匹配: 老写法 `\bDTS\b` 在 "DTS5.1" 上会失败
+#    —— T 后面紧接数字 5, 没有词边界, 于是整段漏剥, 归一化后留下 "DTS5 1" 残渣。
+_CH = r"(?:[._\-\s]?(?:5[._\-\s]?1|7[._\-\s]?1|2[._\-\s]?0))"
 RE_AUDIO = re.compile(
-    rf"\b(?:DTS{_S}HD{_S}MA{_S}5{_S}1|DTS{_S}HD{_S}MA|DTS{_S}HD|DTS{_S}MA"
-    rf"|DTS{_S}ES|TrueHD{_S}Atmos|TrueHD|Atmos|MA{_S}5{_S}1"
-    rf"|DDP?{_S}5{_S}1|DD\+|AC3|AAC|FLAC|MP3|DTS|5{_S}1|7{_S}1|2{_S}0)\b",
+    rf"\b(?:DTS{_S}HD{_S}MA{_CH}?|DTS{_S}HD{_CH}?|DTS{_S}MA{_CH}?|DTS{_S}ES{_CH}?"
+    rf"|DTS{_S}X{_CH}?"
+    rf"|DTS{_CH}?"
+    rf"|TrueHD{_S}Atmos{_CH}?|TrueHD{_CH}?|Atmos{_CH}?"
+    rf"|DDP{_CH}?|DD\+{_CH}?|EAC3{_CH}?|AC3{_CH}?|AAC{_CH}?|FLAC|MP3"
+    rf"|MA{_CH}"
+    rf"|{_CH})\b",
     re.IGNORECASE,
 )
+
+# 音轨数量标记: 2Audio / 3Audios / MultiAudio / DualAudio (老片源常见)
+RE_AUDIO_COUNT = re.compile(
+    rf"\b(?:\d{{1,2}}{_S}Audios?|Multi{_S}Audios?|Dual{_S}Audios?)\b",
+    re.IGNORECASE,
+)
+
+# 帧率标记: 60fps / 23.976fps / 60 fps
+RE_FPS = re.compile(rf"\b\d{{2,3}}(?:[._]\d{{1,3}})?{_S}?fps\b", re.IGNORECASE)
 
 # 来源 (含流媒体平台标记: NF=Netflix, AMZN=Amazon, HULU, DSYP=Disney+,
 #  ATVP=AppleTV+, PCOK=Peacock)
@@ -70,9 +86,9 @@ RE_HDR = re.compile(
     r"\b(?:HDR10\+|HDR10|HDR|DoVi|DV|HLG)\b", re.IGNORECASE,
 )
 
-# 杂项发行标记 + 字幕/语言标记
+# 杂项发行标记 + 字幕/语言标记 (HQ = 高码版)
 RE_MISC = re.compile(
-    r"\b(?:Complete|PROPER|REPACK|EXTENDED|UNRATED|REMASTERED|IMAX|MULTi|DUAL"
+    r"\b(?:Complete|PROPER|REPACK|EXTENDED|UNRATED|REMASTERED|IMAX|MULTi|DUAL|HQ"
     r"|Hybrid|10bit|8bit|Hi10P|HD)\b"
     r"|中英字幕|中文字幕|国语|粤语|中字",
     re.IGNORECASE,
@@ -119,8 +135,8 @@ def clean_title(raw: str) -> str:
     t = RE_BRACKET.sub(" ", t)
 
     # 4. 技术标签 —— 顺序敏感: 音频整串短语必须早于裸 HD / 5.1
-    for rx in (RE_AUDIO, RE_LANG_RUN, RE_SOURCE, RE_CODEC,
-               RE_RESOLUTION, RE_HDR, RE_MISC):
+    for rx in (RE_AUDIO, RE_AUDIO_COUNT, RE_LANG_RUN, RE_SOURCE, RE_CODEC,
+               RE_RESOLUTION, RE_FPS, RE_HDR, RE_MISC):
         t = rx.sub(" ", t)
 
     # 5. 结尾压制组

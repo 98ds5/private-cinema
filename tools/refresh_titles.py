@@ -74,10 +74,17 @@ def main():
     ap = argparse.ArgumentParser(description="重算存量作品标题")
     ap.add_argument("--apply", action="store_true",
                     help="实际写入数据库 (默认只 dry-run 报告差异)")
+    ap.add_argument("--db", default=None,
+                    help="指定数据库文件 (默认用 config.json 的 system.db_path); "
+                         "用于重算打包版/演示版的库, 例如 D:/Apps/私人影院/data/cinema.db")
     args = ap.parse_args()
 
     config = load_config()
-    init_database(config.get("system", {}).get("db_path", "./data/cinema.db"))
+    db_path = args.db or config.get("system", {}).get("db_path",
+                                                      "./data/cinema.db")
+    init_database(db_path)
+
+    print("数据库 -> %s" % db_path)
 
     libs, medias, first_files = collect()
     print("媒体库 -> %s" % (libs,))

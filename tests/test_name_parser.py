@@ -156,3 +156,46 @@ class TestCleanTitle:
     def test_empty_input(self):
         assert clean_title("") == ""
         assert clean_title(None) == ""
+
+    # ---- 2026-09-18: 点号粘连的音频标记 / 音轨数量 / 帧率 / HQ ----
+    def test_glued_audio_and_hq_stripped(self):
+        """真实目录名: DTS5.1 粘连 + HQ。旧正则 `\\bDTS\\b` 在 T 后是数字时过不去,
+        整段漏剥, 归一化后留下 "DTS5 1" 残渣"""
+        raw = ("【高清影视之家发布 www.HDBTHD.com】罗小黑战记2[杜比视界版本][高码版]"
+               "[国语配音+中文字幕].2025.2160p.WEB-DL.H265.HQ.DV.DTS5.1-PandaQT")
+        assert clean_title(raw) == "罗小黑战记2"
+
+    def test_fps_tag_stripped(self):
+        """真实目录名: 60fps 帧率版本 + 粘连音频"""
+        raw = ("【高清影视之家发布 www.SSDSSE.com】长安的荔枝[60帧率版本][杜比视界版本]"
+               "[高码版][国语配音+中文字幕].2025.2160p.WEB-DL.H265.HQ.DV.60fps"
+               ".DTS5.1-PandaQT")
+        assert clean_title(raw) == "长安的荔枝"
+
+    def test_audio_track_count_stripped(self):
+        """真实目录名: DTS-HD.MA.5.1 与 2Audio 连写; 中英文片名都要保留"""
+        raw = ("【高清影视之家发布 www.WHATMV.com】罗小黑战记[国英多音轨+简繁英字幕]"
+               ".The.Legend.of.Hei.2019.1080p.BluRay.Remux.AVC.DTS-HD.MA.5.1"
+               ".2Audio-QuickIO")
+        assert clean_title(raw) == "罗小黑战记 The Legend of Hei"
+
+    @pytest.mark.parametrize("raw,expect", [
+        ("Movie.2019.1080p.WEB-DL.EAC3.5.1.HQ", "Movie"),
+        ("Movie.2019.1080p.WEB-DL.TrueHD.Atmos.7.1.x265", "Movie"),
+        ("Movie.2019.1080p.WEB-DL.DDP5.1.AAC", "Movie"),
+        ("Movie.2019.1080p.WEB-DL.DTS-HD.MA.7.1.3Audio-GROUP", "Movie"),
+        ("Movie.2021.2160p.WEB-DL.23.976fps.DTS-X.7.1", "Movie"),
+    ])
+    def test_various_audio_fps_forms(self, raw, expect):
+        assert clean_title(raw) == expect
+
+    def test_trailing_group_survives_audio_strip(self):
+        """回归锁: 声道数做可选匹配时, 不能把压制组前的连字符一起吃掉
+        (否则 "DTS-FraMeSToR" 会留下 "FraMeSToR")"""
+        assert clean_title("Pacific.Rim.2013.1080p.BluRay.x264.DTS-FraMeSToR") == \
+            "Pacific Rim"
+
+    @pytest.mark.parametrize("raw", ["罗小黑战记2", "帕丁顿熊3", "霍比特人1：意外之旅"])
+    def test_title_digits_not_eaten_as_audio(self, raw):
+        """片名里的序号数字不能被音轨/声道规则当噪声吃掉"""
+        assert clean_title(raw) == raw
