@@ -8,18 +8,24 @@ from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame,
     QComboBox, QPushButton, QFileDialog, QMessageBox, QScrollArea,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from app.services.player import PlayerService
 from app.services.scanner import ScanWorker
 from app.storage.local import LocalStorage
 from app.services.parser import ParseWorker
 from app.services.posters import PosterWorker
+from app.services.maintenance import (clear_library, list_backups,
+                                      restore_latest, snapshot)
 from app.utils.path_detector import detect_ffmpeg
 from app.ui.styles import save_config
 
 
 class SettingsPage(QWidget):
+
+    # 媒体库被清空/恢复后发出: 主窗口收到要重新查库刷新页面
+    library_changed = Signal()
+
     def __init__(self, config: dict = None,
                  ffprobe_path=None, mpv_path=None,
                  player_service=None, parent=None):
@@ -36,6 +42,7 @@ class SettingsPage(QWidget):
 
         self._build_ui()
         self._refresh_lib_list()
+        self._refresh_maintenance()
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
@@ -184,6 +191,49 @@ class SettingsPage(QWidget):
         self._poster_status.setObjectName("settingValue")
         layout.addWidget(self._poster_status)
 
+        # ---- 媒体库维护 (危险操作: 清空前自动备份, 可一键恢复) ----
+        mg = QFrame()
+        mg.setObjectName("settingGroup")
+        mg_v = QVBoxLayout(mg)
+        mg_v.setSpacing(8)
+
+        mg_title = QLabel("媒体库维护")
+        mg_title.setObjectName("settingLabel")
+        mg_v.addWidget(mg_title)
+
+        self._maint_status = QLabel("")
+        self._maint_status.setObjectName("settingValue")
+        mg_v.addWidget(self._maint_status)
+
+        maint_row = QHBoxLayout()
+        maint_row.setSpacing(8)
+
+        self._clear_btn = QPushButton("清空媒体库")
+        self._clear_btn.setObjectName("themeToggle")
+        self._clear_btn.setStyleSheet(
+            "background-color: #d63031; color: #ffffff; font-weight: 600;"
+            "padding: 6px 16px; border-radius: 8px; border: none;"
+        )
+        self._clear_btn.setToolTip(
+            "删除全部作品/文件记录与海报缓存。\n"
+            "① 硬盘上的视频文件不会被删除\n"
+            "② 媒体库目录配置保留, 可以直接重新扫描\n"
+            "③ 清空前会自动备份, 之后可点「恢复最近备份」找回"
+        )
+        self._clear_btn.clicked.connect(self._clear_library)
+        maint_row.addWidget(self._clear_btn)
+
+        self._restore_btn = QPushButton("恢复最近备份")
+        self._restore_btn.setObjectName("themeToggle")
+        self._restore_btn.setToolTip("从 data/backup/ 里最新的一份备份恢复数据库与海报缓存")
+        self._restore_btn.clicked.connect(self._restore_library)
+        maint_row.addWidget(self._restore_btn)
+
+        maint_row.addStretch()
+        mg_v.addLayout(maint_row)
+
+        layout.addWidget(mg)
+
         layout.addStretch()
 
         scroll.setWidget(container)
@@ -318,6 +368,7 @@ class SettingsPage(QWidget):
             f"丢失 {stats.get('missing',0)}  |  "
             f"错误 {stats.get('errors',0)}"
         )
+        self._refresh_maintenance()
 
     def _on_scan_error(self, msg):
         self._scan_status.setText(f"错误: {msg}")
@@ -346,6 +397,7 @@ class SettingsPage(QWidget):
         )
         self._scan_btn.setEnabled(True)
         self._scan_btn.setText("开始扫描")
+        self._refresh_maintenance()
 
     # ------------------------------------------------------------------
     # 海报提取 (本地内嵌封面, 不联网)
@@ -396,3 +448,109 @@ class SettingsPage(QWidget):
         )
         self._poster_btn.setEnabled(True)
         self._poster_btn.setText("提取内嵌封面")
+        self._refresh_maintenance()
+
+    # ------------------------------------------------------------------
+    # 媒体库维护: 清空 / 恢复 (危险操作, 走确认框 + 自动备份)
+    # ------------------------------------------------------------------
+    def _refresh_maintenance(self):
+        try:
+            s = snapshot()
+            backups = list_backups()
+        except Exception as e:
+            self._maint_status.setText(f"媒体库维护: 读取失败 {type(e).__name__}: {e}")
+            self._restore_btn.setEnabled(False)
+            return
+
+        newest = backups[0].name if backups else "无"
+        self._maint_status.setText(
+            f"当前 {s['media']} 部作品 / {s['files']} 个文件 / {s['posters']} 张海报缓存"
+            f"  |  备份 {len(backups)} 份, 最近 {newest}"
+        )
+        self._restore_btn.setEnabled(bool(backups))
+
+    def _confirm(self, title: str, text: str, info: str, ok_label: str) -> bool:
+        """危险操作确认框: 自定义中文按钮, 默认按钮是「取消」"""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setInformativeText(info)
+        ok_btn = box.addButton(ok_label, QMessageBox.DestructiveRole)
+        cancel_btn = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel_btn)
+
+        # 离屏冒烟/测试里弹模态框会永久阻塞事件循环, 这里允许被替换掉
+        box.exec()
+        return box.clickedButton() is ok_btn
+
+    def _clear_library(self):
+        try:
+            s = snapshot()
+            backups = len(list_backups())
+        except Exception as e:
+            self._maint_status.setText(f"清空失败: {type(e).__name__}: {e}")
+            return
+
+        if s["media"] == 0 and s["files"] == 0:
+            self._maint_status.setText("媒体库本来就是空的, 不需要清空")
+            return
+
+        if not self._confirm(
+            "确认清空媒体库",
+            f"将删除 {s['media']} 部作品、{s['files']} 个文件记录、{s['posters']} 张海报缓存。",
+            "• 硬盘上的视频文件不会被删除\n"
+            "• 媒体库目录配置会保留, 可以直接重新扫描\n"
+            f"• 清空前会自动备份(现有 {backups} 份), 之后可点「恢复最近备份」找回",
+            "确认清空",
+        ):
+            self._maint_status.setText("已取消清空")
+            return
+
+        try:
+            res = clear_library()
+        except Exception as e:
+            self._maint_status.setText(f"清空失败(未删除任何数据): {type(e).__name__}: {e}")
+            return
+
+        self._refresh_maintenance()
+        self._maint_status.setText(
+            f"已清空: 删除 {res['media']} 部作品 / {res['files']} 个文件 / "
+            f"{res['posters']} 张海报; 备份保存在 {res['backup']}"
+        )
+        self.library_changed.emit()
+
+    def _restore_library(self):
+        backups = []
+        try:
+            backups = list_backups()
+        except Exception as e:
+            self._maint_status.setText(f"恢复失败: {type(e).__name__}: {e}")
+            return
+
+        if not backups:
+            self._maint_status.setText("没有可用备份")
+            return
+
+        if not self._confirm(
+            "确认恢复备份",
+            f"将用备份 {backups[0].name} 覆盖当前媒体库(工作区数据会被替换)。",
+            "• 硬盘上的视频文件不受影响\n"
+            "• 数据库与海报缓存会一起还原到备份时的状态",
+            "确认恢复",
+        ):
+            self._maint_status.setText("已取消恢复")
+            return
+
+        try:
+            res = restore_latest()
+        except Exception as e:
+            self._maint_status.setText(f"恢复失败: {type(e).__name__}: {e}")
+            return
+
+        self._refresh_maintenance()
+        self._maint_status.setText(
+            f"已从备份恢复: {res['media']} 部作品 / {res['files']} 个文件 / "
+            f"{res['posters']} 张海报  ({res['backup']})"
+        )
+        self.library_changed.emit()

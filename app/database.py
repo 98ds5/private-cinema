@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase
 
 _engine = None
 _SessionFactory = None
+_db_path = None
 
 
 class Base(DeclarativeBase):
@@ -18,7 +19,9 @@ class Base(DeclarativeBase):
 
 def init_database(db_path: str = "./data/cinema.db") -> None:
     """初始化数据库: 建目录、创建 Engine、开 WAL、建表并建 Session 工厂"""
-    global _engine, _SessionFactory
+    global _engine, _SessionFactory, _db_path
+
+    _db_path = str(db_path)
 
     # 确保 data/ 目录存在
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -51,3 +54,23 @@ def get_session() -> Session:
     if _SessionFactory is None:
         raise RuntimeError("数据库未初始化, 请先调用 init_database()")
     return _SessionFactory()
+
+
+def current_db_path() -> str:
+    """当前已初始化的库文件路径 (媒体库维护/备份要用它定位 data/backup/)"""
+    if _db_path is None:
+        raise RuntimeError("数据库未初始化, 请先调用 init_database()")
+    return _db_path
+
+
+def dispose_engine() -> None:
+    """
+    释放连接池里的所有连接。
+    恢复备份前必须调用 —— 否则 Windows 上库文件仍被占用, 写不进去。
+    释放后需再调 init_database() 才能继续用。
+    """
+    global _engine, _SessionFactory
+    if _engine is not None:
+        _engine.dispose()
+    _engine = None
+    _SessionFactory = None

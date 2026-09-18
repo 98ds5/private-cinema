@@ -227,10 +227,13 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(LibraryPage(view="movie", stats_service=self.stats_service))
         self.pages.addWidget(LibraryPage(view="anime", stats_service=self.stats_service))
         self.pages.addWidget(LibraryPage(view="recent", stats_service=self.stats_service))
-        self.pages.addWidget(SettingsPage(
+        # 存成属性: 清空/恢复媒体库后要靠它的信号刷新其它页面
+        self._settings_page = SettingsPage(
             config=self.config, ffprobe_path=self.ffprobe_path,
             mpv_path=self.mpv_path, player_service=self.player_service,
-        ))
+        )
+        self._settings_page.library_changed.connect(self._on_library_changed)
+        self.pages.addWidget(self._settings_page)
 
         self._nav.currentRowChanged.connect(self._on_page_changed)
         self._nav.setCurrentRow(0)
@@ -294,6 +297,18 @@ class MainWindow(QMainWindow):
         if old is not None:
             self.pages.removeWidget(old)
             old.deleteLater()
+
+    # ---- 媒体库被清空/恢复 ----
+    def _on_library_changed(self):
+        """
+        库内容变了: 回首页并重查数据。
+        直接刷新当前页不够 —— 详情页可能已经在看一部被清掉的作品, 所以统一回首页;
+        切页本身会触发 _on_page_changed 里的 refresh(), 库页也随之重查。
+        """
+        if self._nav.currentRow() != 0:
+            self._nav.setCurrentRow(0)
+        else:
+            self._home_page.refresh()
 
     # ---- 页面切换 ----
     def _on_page_changed(self, idx: int):
