@@ -29,6 +29,20 @@ for _f in ("ffi.dll", "libexpat.dll"):
     if _p.is_file():
         binaries.append((str(_p), "."))
 
+# pypinyin 的拼音词库是两个 .json 数据文件, 且它在 **import 时**就读盘
+# (pinyin_dict.py / phrases_dict.py 末尾直接调用 _load_xxx())。
+# PyInstaller 没有官方 hook, 不显式收集的话冻结后 import pypinyin 会
+# FileNotFoundError -> 拼音检索静默失效 (代码里已做降级, 但这里要让它真的能用)。
+_pypinyin_dir = (Path(SPECPATH) / "cinema_env" / "Lib" / "site-packages"
+                 / "pypinyin")
+if _pypinyin_dir.is_dir():
+    _pp_json = list(_pypinyin_dir.rglob("*.json"))
+    for _f in _pp_json:
+        datas.append((str(_f), "pypinyin"))
+    print(f"[SPEC] 已内嵌 pypinyin 词库 ({len(_pp_json)} 个 json)")
+else:
+    print("[SPEC] 警告: 未找到 pypinyin, 打包版的拼音检索会降级")
+
 block_cipher = None
 
 a = Analysis(

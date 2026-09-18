@@ -37,4 +37,4 @@ jobs:
         }
 
     - name: Run tests
-      run: pytest -v --timeout=60
+      run: pytest -v

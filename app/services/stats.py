@@ -8,6 +8,7 @@ from sqlalchemy import func
 from app.database import get_session
 from app.models.tables import Episode, Media, MediaFile, Season
 from app.utils.quality import best_hdr, fmt_dur, has_chinese_subtitle
+from app.utils.search import is_match
 
 # 名称/年份排序用系统 locale 的语言学规则 (中文系统 = 拼音序, 英文大小写不敏感)。
 # 只动 LC_COLLATE; setlocale 失败时 strxfrm 退化成码点序, 依然确定可用。
@@ -198,7 +199,18 @@ class StatsService:
             if media_type and media_type != "all":
                 q = q.filter(Media.media_type == media_type)
             if search:
-                q = q.filter(Media.title.ilike(f"%{search}%"))
+                # 模糊匹配在 Python 里打分: SQL 的 LIKE 只能做「连续子串」,
+                # 归一化 / 跳字 / 错别字容错这些规则塞不进 SQL。
+                # 先用同一个 q 取出 (id, 标题) 候选, 再用命中的 id 过滤 ——
+                # 后面的排序、分页、画质聚合逻辑一行都不用改。
+                hits = [
+                    mid for mid, title in
+                    q.with_entities(Media.id, Media.title).all()
+                    if is_match(search, title or "")
+                ]
+                if not hits:
+                    return {"total": 0, "items": []}
+                q = q.filter(Media.id.in_(hits))
 
             total = q.count()
 
