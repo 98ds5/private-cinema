@@ -1,5 +1,13 @@
 # 私人影院 — 本地影视资源管理
 
+**Local media library manager** — scan, parse, poster, resume playback, stats.
+Built with PySide6 + SQLAlchemy 2.0 / SQLite + ffprobe + MPV.
+
+[![CI](https://github.com/98ds5/private-cinema/actions/workflows/ci.yml/badge.svg)](https://github.com/98ds5/private-cinema/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Tests](https://img.shields.io/badge/tests-438%20passed-brightgreen)
+![License](https://img.shields.io/badge/License-MIT-green)
+
 用 PySide6 写的本地影视库桌面应用：扫描目录入库、解析视频参数、管理海报、
 双引擎播放与续播、数据统计。课设项目。
 
