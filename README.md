@@ -111,6 +111,6 @@ pyinstaller cinema.spec
 │   └── utils/               # name_parser(文件名解析) quality(画质分级) config_utils 等
 ├── .github/workflows/       # CI 配置
 ├── tools/                   # 离屏冒烟 / mpv 链路验证等开发脚本
-├── tests/                   # pytest 回归 (~380 条)
+├── tests/                   # pytest 回归 (438 条)
 └── data/                    # 运行时自动创建 (数据库 + 海报缓存)
 ```
