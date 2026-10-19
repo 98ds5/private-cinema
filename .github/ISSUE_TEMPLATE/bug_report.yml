@@ -1,0 +1,69 @@
+name: Bug report
+description: 某个操作没按预期工作 / 崩溃 / 界面塌了
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        报之前先看一眼 [README](../blob/master/README.md) 的「快速开始」和「外部依赖」——
+        大部分"扫不出来 / 没海报 / 放不了"是 ffprobe、mpv 没找到，或目录里没有可识别的视频文件。
+
+  - type: dropdown
+    id: run-mode
+    attributes:
+      label: 怎么跑的
+      options:
+        - 源码运行 (python main.py)
+        - 打包版 (dist/ 里的 exe)
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: Windows 版本 / Python 版本（打包版写 exe 版本）
+      placeholder: "Windows 11 23H2 / Python 3.11.16"
+    validations:
+      required: true
+
+  - type: input
+    id: tools
+    attributes:
+      label: ffprobe / mpv 检测结果
+      description: 设置页底部显示的两个路径（没找到就写"未找到"）
+      placeholder: "F:\\private-cinema\\_tools\\ffprobe.exe / F:\\private-cinema\\_tools\\mpv.exe"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 点哪里、点第几次、涉及多少文件/什么命名
+      placeholder: |
+        1. 添加目录 D:\\Videos\\某番剧（12 集，命名 [Group] 名称 - 01 [1080p].mkv）
+        2. 等扫描完成
+        3. 点第 3 集进入详情页
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望 / 实际
+      value: |
+        期望：
+        实际：
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 控制台输出
+      description: 源码运行的话贴终端全文；打包版可以忽略这一项
+      render: text
+    validations:
+      required: false
