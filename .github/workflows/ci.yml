@@ -27,14 +27,8 @@ jobs:
         pip install -r requirements.txt
         pip install pytest pytest-qt
 
-    - name: Install ffmpeg (for ffprobe)
-      run: choco install ffmpeg -y --no-progress
-
-    - name: Download mpv + ffmpeg
-      run: |
-        if (!(Test-Path "_tools/mpv.exe")) {
-          .\scripts\download-tools.ps1
-        }
+    - name: Install tools (mpv / ffmpeg / ffprobe) via the same script users run
+      run: .\scripts\download-tools.ps1
 
     - name: Run tests
       run: pytest -v
