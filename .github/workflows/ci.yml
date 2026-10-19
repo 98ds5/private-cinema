@@ -7,6 +7,8 @@ on:
     branches: [ master ]
 
 jobs:
+  # 438 条测试全部不依赖 mpv/ffmpeg 二进制（子进程边界都打了桩），
+  # 所以这里不下载工具 —— 少 3 次 240MB 下载，跑得也快。
   test:
     runs-on: windows-latest
     strategy:
@@ -27,8 +29,23 @@ jobs:
         pip install -r requirements.txt
         pip install pytest pytest-qt
 
-    - name: Install tools (mpv / ffmpeg / ffprobe) via the same script users run
-      run: .\scripts\download-tools.ps1
-
     - name: Run tests
       run: pytest -v
+
+  # 单独验证用户会跑的那条命令：脚本必须能真的把 mpv/ffmpeg/ffprobe 拉下来。
+  # 2026-09 那次 CI 红了一整个月，根因就在这里（上游 asset 名里带构建 hash，
+  # 写死就 404），所以这个 job 本身就是个回归测试。
+  tools-install:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run the install script users run
+      run: .\scripts\download-tools.ps1
+
+    - name: Assert the three binaries exist and run
+      run: |
+        Get-Item _tools\mpv.exe, _tools\ffmpeg.exe, _tools\ffprobe.exe | Select-Object Name, Length
+        & _tools\mpv.exe --version
+        & _tools\ffprobe.exe -version
